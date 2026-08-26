@@ -9,9 +9,10 @@ import json
 import re
 from pathlib import Path
 
-import documento
+from . import documento
+from core import RAIZ
 
-DIRECTORIO = Path(__file__).parent / "plantillas"
+DIRECTORIO = RAIZ / "plantillas"
 PERSONALIZADAS = DIRECTORIO / "personalizadas"
 
 TIPOS_CAMPO = ("texto", "cedula", "entero", "fecha", "lista")

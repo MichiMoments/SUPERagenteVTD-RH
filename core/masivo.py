@@ -16,9 +16,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.datavalidation import DataValidation
 
-import campos
-import documento
-import tipos
+from . import campos
+from . import documento
+from . import tipos
 
 HOJA_DATOS, HOJA_INSTRUCCIONES = "Otrosíes", "Instrucciones"
 FILAS_PLANTILLA = 300

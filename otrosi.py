@@ -7,14 +7,14 @@ from datetime import date
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
-import campos
-import documento
-import ia
-import masivo
-import tipos
-import transcripcion
+from core import campos
+from core import documento
+from core import ia
+from core import masivo
+from core import tipos
+from core import transcripcion
 
-from campos import FECHA_MAXIMA, FECHA_MINIMA
+from core.campos import FECHA_MAXIMA, FECHA_MINIMA
 
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -803,13 +803,6 @@ def _inferir_campos(encontrados, cuerpo):
     return campos_generados, []
 
 
-def _renombrar_marcadores(cuerpo, variables, campos_generados):
-    """'{{Teletrabajadora}}' -> '{{teletrabajadora}}'; solo cambia el marcador, no el texto."""
-    for variable, campo in zip(variables, campos_generados):
-        cuerpo = cuerpo.replace("{{" + variable + "}}", "{{" + campo["clave"] + "}}")
-    return cuerpo
-
-
 def _catalogo(disponibles):
     """La lista de tipos con sus acciones, cuando no se está editando ninguno."""
     st.caption(
@@ -863,7 +856,7 @@ def _catalogo(disponibles):
                                 label=f"Consultando la IA para {len(encontrados)} campos…"
                             )
                         campos_generados, avisos_ia = _inferir_campos(encontrados, cuerpo)
-                        cuerpo = _renombrar_marcadores(cuerpo, encontrados, campos_generados)
+                        cuerpo = transcripcion.renombrar_marcadores(cuerpo, encontrados, campos_generados)
 
                         estado.update(label="Listo.", state="complete")
 
