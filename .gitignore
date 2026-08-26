@@ -7,3 +7,5 @@ documentos/
 
 .streamlit/secrets.toml
 .streamlit/
+
+.env

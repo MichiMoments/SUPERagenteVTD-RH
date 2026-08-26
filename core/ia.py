@@ -11,7 +11,7 @@ import json
 
 import requests
 
-import tipos
+from . import tipos
 
 MODELO_DEFECTO = "gemini-3-flash-preview"
 

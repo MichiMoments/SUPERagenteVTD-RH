@@ -21,8 +21,8 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 from lxml.etree import XMLSyntaxError
 
-import campos
-import documento
+from . import campos
+from . import documento
 
 _ERROR_ARCHIVO = (
     "No se pudo abrir el archivo como documento de Word. Ábrelo en Word y usa «Guardar "
@@ -818,3 +818,10 @@ def convertir_guillemets_a_marcadores(cuerpo):
     desconocidos hasta que alguien declare el campo y renombre el marcador a juego.
     """
     return cuerpo.replace("«", "{{").replace("»", "}}")
+
+
+def renombrar_marcadores(cuerpo, variables, campos_generados):
+    """'{{Teletrabajadora}}' -> '{{teletrabajadora}}'; solo cambia el marcador, no el texto."""
+    for variable, campo in zip(variables, campos_generados):
+        cuerpo = cuerpo.replace("{{" + variable + "}}", "{{" + campo["clave"] + "}}")
+    return cuerpo
