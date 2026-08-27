@@ -5,13 +5,12 @@ tres operaciones del proyecto: generación individual, masiva y creación de
 plantillas.
 """
 
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langgraph.prebuilt import create_react_agent
 
 from agent.tools import todas
 
-MODELO = "gemini-2.0-flash"
+MODELO = "gemini-3.5-flash"
 
 PROMPT_SISTEMA = """\
 Eres un asistente de Recursos Humanos de la Universidad de los Andes que ayuda \
@@ -27,6 +26,9 @@ Capacidades:
 
 Reglas:
 - Si el usuario adjunta un .docx, probablemente quiere crear una nueva plantilla.
+- Cuando crees una plantilla con 'crear_plantilla', muestra al usuario las \
+variables definidas: para cada una indica su clave, etiqueta, tipo y si es \
+obligatoria. Si hay avisos o errores, menciónalos también.
 - Si adjunta un .xlsx, probablemente quiere generar contratos masivos.
 - Si pide generar un contrato, primero usa 'describir_tipo' para saber qué \
 campos necesitas, y pregúntale al usuario los que falten antes de invocar \
@@ -39,34 +41,10 @@ invocarla.
 
 
 def crear_agente(clave_api, modelo=MODELO):
-    """Construye un AgentExecutor listo para .invoke().
-
-    Args:
-        clave_api: Clave de la API de Google (Gemini).
-        modelo: Nombre del modelo de Gemini a usar.
-
-    Returns:
-        AgentExecutor con las herramientas y el prompt configurados.
-    """
     llm = ChatGoogleGenerativeAI(
         model=modelo,
         google_api_key=clave_api,
         temperature=0.1,
     )
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", PROMPT_SISTEMA),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-        MessagesPlaceholder("agent_scratchpad"),
-    ])
-
-    agente = create_tool_calling_agent(llm, todas, prompt)
-
-    return AgentExecutor(
-        agent=agente,
-        tools=todas,
-        verbose=False,
-        handle_parsing_errors=True,
-        max_iterations=10,
-    )
+    return create_react_agent(llm, todas, prompt=PROMPT_SISTEMA)

@@ -97,7 +97,7 @@ def generar_contrato(tipo_id: str, datos: dict) -> dict:
 
 
 @tool
-def generar_masivo(tipo_id: str, xlsx_base64: str, fecha_defecto: str = "") -> dict:
+def generar_masivo(tipo_id: str, xlsx_ruta: str, fecha_defecto: str = "") -> dict:
     """Genera contratos masivos (.zip de .docx) a partir de un archivo Excel.
 
     Úsala cuando el usuario adjunte un archivo .xlsx con datos de múltiples
@@ -105,21 +105,24 @@ def generar_masivo(tipo_id: str, xlsx_base64: str, fecha_defecto: str = "") -> d
 
     Args:
         tipo_id: Identificador del tipo de otrosí.
-        xlsx_base64: Contenido del archivo Excel codificado en base64.
-        fecha_defecto: Fecha por defecto para campos de fecha opcionales vacíos
-                       (formato YYYY-MM-DD). Si no se da, usa la fecha de hoy.
+        xlsx_ruta: Ruta local al archivo Excel descargado.
+        fecha_defecto: Fecha por defecto (YYYY-MM-DD). Si no se da, usa hoy.
     """
     try:
         tipo = tipos.cargar(tipo_id)
     except ValueError as e:
         return {"error": str(e)}
 
-    xlsx_bytes = base64.b64decode(xlsx_base64)
+    try:
+        with open(xlsx_ruta, "rb") as f:
+            xlsx_bytes = f.read()
+    except FileNotFoundError:
+        return {"error": f"No se encontró el archivo: {xlsx_ruta}"}
 
     try:
         fecha = date.fromisoformat(fecha_defecto) if fecha_defecto else date.today()
     except ValueError:
-        return {"error": f"Fecha inválida: '{fecha_defecto}'. Usa el formato YYYY-MM-DD."}
+        return {"error": f"Fecha inválida: '{fecha_defecto}'. Usa YYYY-MM-DD."}
 
     registros, errores_libro = masivo.leer_libro(tipo, xlsx_bytes, fecha)
     if errores_libro:
@@ -127,18 +130,26 @@ def generar_masivo(tipo_id: str, xlsx_base64: str, fecha_defecto: str = "") -> d
 
     validos = [r for r in registros if not r["errores"]]
     if not validos:
-        todos_errores = []
-        for r in registros:
-            if r["errores"]:
-                todos_errores.append(f"Fila {r['fila']}: {'; '.join(r['errores'])}")
+        todos_errores = [
+            f"Fila {r['fila']}: {'; '.join(r['errores'])}"
+            for r in registros if r["errores"]
+        ]
         return {"error": "Ninguna fila es válida", "errores": todos_errores}
 
     zip_bytes, fallos, generados = masivo.generar_zip(tipo, validos)
 
+    output_dir = os.path.join(os.path.dirname(__file__), "..", "output")
+    os.makedirs(output_dir, exist_ok=True)
+    nombre_zip = f"masivo_{tipo_id}.zip"
+    ruta_zip = os.path.join(output_dir, nombre_zip)
+    with open(ruta_zip, "wb") as f:
+        f.write(zip_bytes)
+
     resultado = {
-        "zip_base64": base64.b64encode(zip_bytes).decode(),
+        "archivo": nombre_zip,
+        "ruta": os.path.abspath(ruta_zip),
         "generados": generados,
-        "mensaje": f"Se generaron {len(generados)} contratos.",
+        "mensaje": f"Se generaron {len(generados)} contratos. Guardados en: {os.path.abspath(ruta_zip)}",
     }
     if fallos:
         resultado["fallos"] = fallos
@@ -153,7 +164,7 @@ def generar_masivo(tipo_id: str, xlsx_base64: str, fecha_defecto: str = "") -> d
 
 
 @tool
-def crear_plantilla(docx_base64: str) -> dict:
+def crear_plantilla(docx_ruta: str) -> dict:
     """Crea una nueva plantilla de otrosí a partir de un documento Word (.docx).
 
     Úsala cuando el usuario adjunte un .docx y quiera convertirlo en una
@@ -161,9 +172,13 @@ def crear_plantilla(docx_base64: str) -> dict:
     se tratan como campos candidatos.
 
     Args:
-        docx_base64: Contenido del archivo .docx codificado en base64.
+        docx_ruta: Ruta local al archivo .docx descargado.
     """
-    docx_bytes = base64.b64decode(docx_base64)
+    try:
+        with open(docx_ruta, "rb") as f:
+            docx_bytes = f.read()
+    except FileNotFoundError:
+        return {"error": f"No se encontró el archivo: {docx_ruta}"}
 
     cuerpo, avisos_docx = transcripcion.leer_docx(docx_bytes)
     encontrados = transcripcion.marcadores_entre_guillemets(cuerpo)
@@ -197,8 +212,18 @@ def crear_plantilla(docx_base64: str) -> dict:
         "tipo": {
             "id": borrador["id"],
             "nombre": borrador["nombre"],
-            "campos": borrador["campos"],
         },
+        "variables": [
+            {
+                "clave": c["clave"],
+                "etiqueta": c["etiqueta"],
+                "tipo": c["tipo"],
+                "obligatorio": c.get("obligatorio", True),
+                **({"opciones": c["opciones"]} if c.get("opciones") else {}),
+            }
+            for c in borrador["campos"]
+            if c.get("clave")
+        ],
         "cuerpo_preview": cuerpo[:500],
         "avisos": [*avisos_docx, *avisos_ia, *avisos_val],
         "mensaje": f"Plantilla creada con {len(borrador['campos'])} campos.",

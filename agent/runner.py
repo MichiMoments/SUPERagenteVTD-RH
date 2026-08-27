@@ -4,7 +4,6 @@ Usa teams_core para la lectura y envío de mensajes por Microsoft Graph.
 El agente decide qué herramienta invocar según el mensaje del usuario.
 """
 
-import base64
 import logging
 import os
 import time
@@ -12,6 +11,7 @@ import time
 from teams_core.config import TeamsConfig
 from teams_core.auth.provider import MsalTokenProvider
 from teams_core.adapters.graph.client import GraphClient
+from teams_core.adapters.graph.downloader import GraphFileDownloader
 from teams_core.adapters.graph.sender import GraphMessageSender
 from teams_core.adapters.graph.reader import GraphMessageReader
 from teams_core.domain.models import ConversationRef, ConversationKind, OutboundMessage
@@ -21,51 +21,52 @@ from agent.bot import crear_agente
 logger = logging.getLogger(__name__)
 
 INTERVALO_POLLING = int(os.environ.get("POLLING_INTERVAL", "10"))
+STAGING_DIR = os.path.join(os.path.dirname(__file__), "..", "output", ".staging")
 
 
-def _extraer_adjuntos(mensaje):
-    """Extrae archivos adjuntos del mensaje como {nombre: bytes_base64}."""
-    adjuntos = {}
-    if not hasattr(mensaje, "attachments") or not mensaje.attachments:
-        return adjuntos
-    for adj in mensaje.attachments:
-        nombre = getattr(adj, "name", None) or "archivo"
-        contenido = getattr(adj, "content", None) or getattr(adj, "content_bytes", None)
-        if contenido and isinstance(contenido, bytes):
-            adjuntos[nombre] = base64.b64encode(contenido).decode()
-        elif contenido and isinstance(contenido, str):
-            adjuntos[nombre] = contenido
-    return adjuntos
+def _descargar_adjuntos(mensaje, downloader):
+    """Descarga adjuntos del mensaje a disco. Devuelve {nombre: ruta_local}."""
+    if not mensaje.attachments:
+        return {}
+    os.makedirs(STAGING_DIR, exist_ok=True)
+    archivos = {}
+    for att in mensaje.attachments:
+        try:
+            descargado = downloader.download(att)
+            ruta = os.path.join(STAGING_DIR, descargado.name)
+            with open(ruta, "wb") as f:
+                f.write(descargado.content)
+            archivos[descargado.name] = ruta
+            logger.info("Adjunto descargado: %s -> %s", att.name, ruta)
+        except Exception as e:
+            logger.warning("No se pudo descargar %s: %s", att.name, e)
+    return archivos
 
 
 def _enriquecer_input(texto, adjuntos):
-    """Añade información de adjuntos al texto de entrada del agente."""
+    """Añade info de adjuntos al texto de entrada del agente (nombre + ruta, sin contenido)."""
     if not adjuntos:
         return texto
     partes = [texto] if texto else []
-    for nombre, b64 in adjuntos.items():
+    for nombre, ruta in adjuntos.items():
         ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
-        partes.append(f"[Archivo adjunto: {nombre} ({ext})]")
+        partes.append(f"[Archivo adjunto: {nombre} ({ext}), ruta: {ruta}]")
     return "\n".join(partes)
 
 
-def _enviar_archivos(sender, conv, resultado, reply_to):
-    """Si el resultado contiene archivos codificados, los envía por Teams."""
-    archivos_enviados = []
-    for clave in ("docx_base64", "xlsx_base64", "zip_base64"):
-        if clave not in resultado:
-            continue
-        nombre = resultado.get("archivo", f"archivo.{clave.split('_')[0]}")
-        try:
-            respuesta = OutboundMessage(
-                body_html=f"<p>Archivo generado: {nombre}</p>",
-                reply_to_message_id=reply_to,
-            )
-            sender.send(conv, respuesta)
-            archivos_enviados.append(nombre)
-        except Exception as e:
-            logger.error("Error enviando archivo %s: %s", nombre, e)
-    return archivos_enviados
+def _extraer_texto(content):
+    """Extrae texto plano del content de un AIMessage (puede ser str o lista de bloques)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        partes = []
+        for bloque in content:
+            if isinstance(bloque, dict) and bloque.get("type") == "text":
+                partes.append(bloque.get("text", ""))
+            elif isinstance(bloque, str):
+                partes.append(bloque)
+        return "\n".join(partes)
+    return str(content)
 
 
 def main():
@@ -88,22 +89,29 @@ def main():
     client = GraphClient(cfg, tokens)
     reader = GraphMessageReader(client)
     sender = GraphMessageSender(client)
+    downloader = GraphFileDownloader(client)
 
     agente = crear_agente(clave_api)
 
     conv = ConversationRef(kind=ConversationKind.CHAT, chat_id=chat_id)
+    es_chat = conv.kind == ConversationKind.CHAT
 
     historial_chat = {}
-    ultimo_visto = None
+    ids_enviados = set()
 
-    logger.info("Agente iniciado. Polling cada %ds en chat %s", INTERVALO_POLLING, chat_id)
+    mensajes_iniciales = reader.history(conv, limit=20)
+    ultimo_visto = mensajes_iniciales[0].message_id if mensajes_iniciales else None
+    logger.info("Agente iniciado. Polling cada %ds en chat %s (último msg: %s)",
+                INTERVALO_POLLING, chat_id, ultimo_visto)
 
     while True:
         try:
             mensajes = reader.history(conv, limit=20)
             nuevos = []
             for msg in mensajes:
-                if ultimo_visto and msg.message_id <= ultimo_visto:
+                if not ultimo_visto or msg.message_id <= ultimo_visto:
+                    continue
+                if msg.message_id in ids_enviados:
                     continue
                 if msg.author.is_application:
                     continue
@@ -112,37 +120,39 @@ def main():
             for msg in nuevos:
                 logger.info("Mensaje de %s: %s", msg.author.display_name, msg.text[:100])
 
-                adjuntos = _extraer_adjuntos(msg)
+                adjuntos = _descargar_adjuntos(msg, downloader)
                 texto_entrada = _enriquecer_input(msg.text or "", adjuntos)
 
                 chat_key = msg.conversation.chat_id or "default"
                 historial = historial_chat.setdefault(chat_key, [])
 
                 try:
-                    resultado = agente.invoke({
-                        "input": texto_entrada,
-                        "chat_history": historial[-20:],
-                    })
+                    from langchain_core.messages import HumanMessage, AIMessage
 
-                    texto_salida = resultado.get("output", "No pude procesar tu solicitud.")
+                    mensajes = historial[-20:] + [HumanMessage(content=texto_entrada)]
+                    resultado = agente.invoke({"messages": mensajes})
+
+                    msgs_salida = resultado.get("messages", [])
+                    texto_salida = _extraer_texto(msgs_salida[-1].content) if msgs_salida else "No pude procesar tu solicitud."
 
                     respuesta = OutboundMessage(
                         body_html=f"<p>{texto_salida}</p>",
-                        reply_to_message_id=msg.message_id,
+                        reply_to_message_id=None if es_chat else msg.message_id,
                     )
-                    sender.send(conv, respuesta)
+                    sent_id = sender.send(conv, respuesta)
+                    ids_enviados.add(sent_id)
 
-                    from langchain_core.messages import HumanMessage, AIMessage
                     historial.append(HumanMessage(content=texto_entrada))
                     historial.append(AIMessage(content=texto_salida))
 
                 except Exception as e:
                     logger.error("Error procesando mensaje %s: %s", msg.message_id, e)
                     try:
-                        sender.send(conv, OutboundMessage(
+                        err_id = sender.send(conv, OutboundMessage(
                             body_html=f"<p>Hubo un error procesando tu solicitud: {e}</p>",
-                            reply_to_message_id=msg.message_id,
+                            reply_to_message_id=None if es_chat else msg.message_id,
                         ))
+                        ids_enviados.add(err_id)
                     except Exception:
                         logger.exception("Error enviando mensaje de error")
 
