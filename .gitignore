@@ -9,3 +9,7 @@ documentos/
 .streamlit/
 
 .env
+
+token_cache.enc
+
+output/
