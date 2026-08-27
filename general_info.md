@@ -22,18 +22,27 @@ touching five separate places in the code. Now it means filling in a form.
 
 ## Architecture
 
-Five modules, and the rule that holds the whole thing together: **Streamlit lives
-only in the UI layer.** Acyclic, no inverted dependencies:
+Six core modules plus two independent UI layers, and the rule that holds the whole
+thing together: **UI layers live only at the top.** Acyclic, no inverted dependencies:
 
 ```
-otrosi.py         Streamlit UI (three tabs)      -> tipos, campos, masivo, documento, transcripcion, ia
-masivo.py         Excel <-> payloads + .zip      -> tipos, campos, documento
-tipos.py          type descriptors on disk       -> documento
-documento.py      marcadores -> Markdown -> docx -> (nothing)
-campos.py         coercion + validation          -> (nothing)
-transcripcion.py  .docx de Word -> Markdown       -> documento, campos
-ia.py             infiere campos con Gemini       -> tipos
+otrosi.py         Streamlit UI (three tabs)      -> core/*
+agent/runner.py   Teams polling loop             -> agent/bot, agent/tools, teams_core
+agent/bot.py      LangGraph ReAct agent          -> agent/tools
+agent/tools.py    @tool wrappers                 -> core/*
+
+core/
+  masivo.py       Excel <-> payloads + .zip      -> tipos, campos, documento
+  tipos.py        type descriptors on disk       -> documento
+  documento.py    marcadores -> Markdown -> docx -> (nothing)
+  campos.py       coercion + validation          -> (nothing)
+  transcripcion.py .docx de Word -> Markdown     -> documento, campos
+  ia.py           infiere campos con Gemini      -> tipos
 ```
+
+Both `otrosi.py` (Streamlit) and `agent/` (Teams) are **independent consumers** of
+`core/`. Neither imports the other. The agent adds `teams_core` (Microsoft Graph
+middleware) and `langchain`/`langgraph` (LLM orchestration) as dependencies.
 
 `campos.py` stopped importing `documento` when gender agreement became type data —
 it now depends only on the standard library.
@@ -598,7 +607,160 @@ new non-UI caller has to do the same.**
   (`otrosi_teletrabajo_20260806.docx`). Harmless for one browser download at a time;
   `masivo._nombres_unicos` de-duplicates for the `.zip`.
 
+## The Teams agent (`agent/`)
+
+A second interface, independent of the Streamlit app, that exposes the same `core/`
+capabilities through a Microsoft Teams chat. The agent runs as a **polling loop** that
+reads messages from a Teams chat via Microsoft Graph, invokes a LangChain/LangGraph
+ReAct agent to decide intent, and sends the response back.
+
+### Architecture
+
+```
+run_agent.py          Entry point: loads .env, calls agent.runner.main()
+agent/
+  runner.py           Polling loop: Teams ↔ agent. Downloads attachments,
+                      enriches input, invokes the agent, sends replies.
+  bot.py              Agent constructor: create_react_agent(Gemini, tools, prompt)
+  tools.py            Six @tool wrappers around core/ functions
+  __init__.py         (empty)
+```
+
+The **design principle** is the same as the Streamlit app: the agent layer is a thin
+adapter. All business logic lives in `core/`. The LLM **never receives file content**
+— it only decides intent from the text message. File handling (download, generation,
+saving) is deterministic in the runner.
+
+### Middleware: `teams_core`
+
+The agent uses the `teams_core` package for all Microsoft Graph interactions.
+**It is installed directly from a GitHub repository:**
+
+```
+pip install git+https://github.com/MichiMoments/MiddlewareTeams.git
+```
+
+This dependency is already declared in `requirements.txt` as:
+```
+teams_core @ git+https://github.com/MichiMoments/MiddlewareTeams.git
+```
+
+The middleware provides:
+
+| Component | Purpose |
+|---|---|
+| `TeamsConfig.from_env()` | Reads all `TEAMS_*` env vars into a config object |
+| `MsalTokenProvider(cfg)` | MSAL OAuth token management (delegated user flow) |
+| `GraphClient(cfg, tokens)` | Low-level HTTP client for Microsoft Graph |
+| `GraphMessageReader(client)` | Reads message history from a Teams chat |
+| `GraphMessageSender(client)` | Sends messages to a Teams chat |
+| `GraphFileDownloader(client)` | Downloads file attachments from Teams messages |
+| `ConversationRef`, `ConversationKind`, `OutboundMessage` | Domain models |
+| `FileAttachment`, `DownloadedFile` | Attachment metadata and downloaded content |
+
+Initialization in `runner.py`:
+```
+TeamsConfig.from_env() → MsalTokenProvider(cfg) → GraphClient(cfg, tokens)
+                                                       ├→ GraphMessageReader
+                                                       ├→ GraphMessageSender
+                                                       └→ GraphFileDownloader
+```
+
+**Important:** `MsalTokenProvider` uses **delegated auth** (user flow, not app-only),
+so `InboundMessage.author.is_application` is always `False` for the bot's own messages.
+The runner filters those out by tracking `ids_enviados` (sent message IDs).
+
+### `token_cache.enc`
+
+An **encrypted MSAL token cache** at the project root, managed by `MsalTokenProvider`.
+It persists Microsoft Graph OAuth tokens (access + refresh) between runs so the agent
+does not need to re-authenticate on every start. Encrypted at rest with the Fernet key
+in `TEAMS_TOKEN_CACHE_KEY`.
+
+- **Must exist at root** (or wherever `TEAMS_TOKEN_CACHE_PATH` points).
+- **Gitignored** — contains session tokens, must never be committed.
+- Created automatically on first authentication; if deleted, the user must
+  re-authenticate.
+
+### Environment variables
+
+All configuration goes in a `.env` file at the project root (loaded by `python-dotenv`
+in `run_agent.py`). There is no `.env.example` — create it manually:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY` | Yes | Google Gemini API key (model: `gemini-3.5-flash`) |
+| `TEAMS_CHAT_ID` | Yes | The Teams chat ID to poll for messages |
+| `TEAMS_TENANT_ID` | Yes | Azure AD tenant ID |
+| `TEAMS_CLIENT_ID` | Yes | Azure AD app registration client ID |
+| `TEAMS_CLIENT_SECRET` | Yes | Azure AD client secret |
+| `TEAMS_REDIRECT_URI` | Yes | OAuth redirect URI (e.g. `http://localhost:8400/callback`) |
+| `TEAMS_TOKEN_CACHE_PATH` | Yes | Path to encrypted token cache (e.g. `./token_cache.enc`) |
+| `TEAMS_TOKEN_CACHE_KEY` | Yes | Fernet key for token cache encryption |
+| `TEAMS_TOKEN_LOCK_URL` | Yes | Redis URL for token-refresh locking |
+| `TEAMS_NOTIFICATION_URL` | Yes | Webhook URL for Teams change notifications |
+| `TEAMS_LIFECYCLE_URL` | Yes | Webhook URL for Teams lifecycle notifications |
+| `TEAMS_CLIENT_STATE` | Yes | Shared secret for validating Teams webhook callbacks |
+| `POLLING_INTERVAL` | No | Seconds between polling cycles (default: `10`) |
+
+### The agent (LLM)
+
+- **Model:** `gemini-3.5-flash` via `langchain-google-genai` (`ChatGoogleGenerativeAI`,
+  temperature 0.1).
+- **Framework:** `langgraph.prebuilt.create_react_agent` — a ReAct loop that decides
+  which tool to call based on the user's message.
+- **System prompt** (`agent/bot.py`): Spanish-language HR assistant persona for
+  Universidad de los Andes. Key rules: `.docx` attachment → template creation;
+  `.xlsx` attachment → bulk generation; ask for missing data before calling tools.
+
+### Tools (`agent/tools.py`)
+
+Six `@tool`-decorated functions, all delegating to `core/`:
+
+| Tool | Input | Output |
+|---|---|---|
+| `listar_tipos()` | — | Markdown list of available types |
+| `describir_tipo(tipo_id)` | type slug | Field details for one type |
+| `generar_contrato(tipo_id, datos)` | type + field values | `{archivo, docx_base64}` |
+| `generar_masivo(tipo_id, xlsx_ruta)` | type + **file path** | Saves `.zip` to `output/`, returns `{ruta}` |
+| `crear_plantilla(docx_ruta)` | **file path** | Saves template, returns `{variables}` with defined fields |
+| `plantilla_excel(tipo_id)` | type slug | `{xlsx_base64}` |
+
+`generar_masivo` and `crear_plantilla` accept **local file paths** (not base64) because
+the runner downloads attachments to `output/.staging/` before invoking the agent. The
+agent sees `[Archivo adjunto: datos.xlsx (xlsx), ruta: output/.staging/datos.xlsx]` in
+the enriched input and passes the path to the tool.
+
+### Attachment flow
+
+```
+User sends .xlsx in Teams
+  → runner polls, finds new message with FileAttachment metadata
+  → GraphFileDownloader.download(att) fetches bytes via Graph Shares API
+  → bytes saved to output/.staging/<filename>
+  → _enriquecer_input adds "[Archivo adjunto: name (ext), ruta: path]" to text
+  → agent sees enriched text, decides intent, calls tool with the file path
+  → tool reads file from disk, processes it, saves output to output/
+  → agent replies with result message
+  → runner sends reply to Teams chat
+```
+
+The same flow applies to `.docx` attachments for template creation. The `output/`
+directory is gitignored.
+
+### Polling loop details (`agent/runner.py`)
+
+- Reads `reader.history(conv, limit=20)` every `POLLING_INTERVAL` seconds.
+- Tracks `ultimo_visto` (last seen message ID) — only processes messages newer than it.
+- Tracks `ids_enviados` — skips messages sent by the bot itself.
+- Skips messages where `author.is_application` is `True`.
+- Maintains per-chat conversation history (last 20 messages) for context.
+- `ConversationKind.CHAT` does not support `reply_to_message_id` — replies go as new
+  messages. Channels support threaded replies.
+
 ## Running it
+
+### Streamlit app (web UI)
 
 ```
 python -m venv venv
@@ -610,6 +772,25 @@ streamlit run otrosi.py
 Generated `.docx` files are meant to land in a local `documentos/` folder
 (gitignored, doesn't exist by default — the app only offers a browser download, it
 doesn't write to disk itself, other than saved types).
+
+### Teams agent
+
+```
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python run_agent.py
+```
+
+Requires a `.env` file with all variables listed above. On first run,
+`MsalTokenProvider` will prompt for OAuth authentication (browser-based).
+After that, `token_cache.enc` persists the tokens.
+
+The agent saves generated files to `output/` (gitignored):
+- `output/.staging/` — downloaded attachments (temporary)
+- `output/masivo_<tipo_id>.zip` — generated bulk contracts
+
+### Both interfaces share `core/`
 
 `tipos.py`, `campos.py` and `masivo.py` are usable without Streamlit, which is what
 keeps the layering honest. To check that it stays true:
