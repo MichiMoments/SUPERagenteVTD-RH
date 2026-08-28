@@ -28,7 +28,7 @@ def listar_tipos() -> str:
     lineas = []
     for identificador, tipo in disponibles.items():
         n_campos = len(tipo.get("campos", []))
-        lineas.append(f"- **{tipo['nombre']}** (id: `{identificador}`) — {n_campos} campos")
+        lineas.append(f"- *{tipo['nombre']}* (id: `{identificador}`) — {n_campos} campos")
     return "\n".join(lineas)
 
 
@@ -47,7 +47,7 @@ def describir_tipo(tipo_id: str) -> str:
     except ValueError as e:
         return f"Error: {e}"
 
-    lineas = [f"**{tipo['nombre']}**", f"Título del documento: {tipo['titulo']}", "", "Campos:"]
+    lineas = [f"*{tipo['nombre']}*", f"Título del documento: {tipo['titulo']}", "", "Campos:"]
     for campo in tipo.get("campos", []):
         obligatorio = "obligatorio" if campo.get("obligatorio", True) else "opcional"
         detalle = f"  - `{campo['clave']}` ({campo['etiqueta']}) — tipo: {campo['tipo']}, {obligatorio}"

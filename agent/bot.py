@@ -37,7 +37,8 @@ campos necesitas, y pregúntale al usuario los que falten antes de invocar \
 invocarla.
 - Responde siempre en español.
 - Sé conciso y directo.
-- Cuando generes un archivo, avísale al usuario que se lo enviarás."""
+- Cuando generes un archivo, avísale al usuario que se lo enviarás.
+- Cuando respondas con texto en negrilla, usa *palabra*, en lugar de **palabra**"""
 
 
 def crear_agente(clave_api, modelo=MODELO):
