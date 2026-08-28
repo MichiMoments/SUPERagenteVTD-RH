@@ -4,6 +4,8 @@ Usa teams_core para la lectura y envío de mensajes por Microsoft Graph.
 El agente decide qué herramienta invocar según el mensaje del usuario.
 """
 
+import base64
+import json
 import logging
 import os
 import time
@@ -14,6 +16,7 @@ from teams_core.adapters.graph.client import GraphClient
 from teams_core.adapters.graph.downloader import GraphFileDownloader
 from teams_core.adapters.graph.sender import GraphMessageSender
 from teams_core.adapters.graph.reader import GraphMessageReader
+from teams_core.adapters.blob.storage import BlobStorageUploader
 from teams_core.domain.models import ConversationRef, ConversationKind, OutboundMessage
 
 from agent.bot import crear_agente
@@ -69,6 +72,59 @@ def _extraer_texto(content):
     return str(content)
 
 
+def _extraer_archivos(mensajes):
+    """Extrae datos de archivos de los ToolMessages del agente."""
+    from langchain_core.messages import ToolMessage
+
+    archivos = []
+    for msg in mensajes:
+        if not isinstance(msg, ToolMessage):
+            continue
+        try:
+            data = json.loads(msg.content) if isinstance(msg.content, str) else None
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(data, dict) or "archivo" not in data:
+            continue
+
+        nombre = data["archivo"]
+        if "docx_base64" in data:
+            archivos.append((nombre, base64.b64decode(data["docx_base64"])))
+        elif "xlsx_base64" in data:
+            archivos.append((nombre, base64.b64decode(data["xlsx_base64"])))
+        elif "ruta" in data:
+            try:
+                with open(data["ruta"], "rb") as f:
+                    archivos.append((nombre, f.read()))
+            except FileNotFoundError:
+                logger.warning("Archivo no encontrado: %s", data["ruta"])
+    return archivos
+
+
+def _subir_archivos(archivos, uploader):
+    """Sube archivos a Azure Blob Storage. Devuelve lista de BlobRef."""
+    refs = []
+    for nombre, contenido in archivos:
+        try:
+            ref = uploader.upload(contenido, nombre)
+            logger.info("Archivo subido a blob: %s -> %s", nombre, ref.url)
+            refs.append(ref)
+        except Exception as e:
+            logger.error("Error subiendo %s a blob storage: %s", nombre, e)
+    return refs
+
+
+def _formatear_enlaces(refs):
+    """Genera HTML con enlaces de descarga para los archivos subidos."""
+    if not refs:
+        return ""
+    lineas = ['<br/><b>Archivos generados:</b><ul>']
+    for ref in refs:
+        lineas.append(f'<li><a href="{ref.url}">{ref.name}</a></li>')
+    lineas.append("</ul>")
+    return "".join(lineas)
+
+
 def main():
     """Arranca el loop de polling contra Teams."""
     logging.basicConfig(
@@ -90,6 +146,7 @@ def main():
     reader = GraphMessageReader(client)
     sender = GraphMessageSender(client)
     downloader = GraphFileDownloader(client)
+    blob_uploader = BlobStorageUploader(cfg)
 
     agente = crear_agente(clave_api)
 
@@ -135,8 +192,14 @@ def main():
                     msgs_salida = resultado.get("messages", [])
                     texto_salida = _extraer_texto(msgs_salida[-1].content) if msgs_salida else "No pude procesar tu solicitud."
 
+                    archivos = _extraer_archivos(msgs_salida)
+                    enlaces_html = ""
+                    if archivos:
+                        refs = _subir_archivos(archivos, blob_uploader)
+                        enlaces_html = _formatear_enlaces(refs)
+
                     respuesta = OutboundMessage(
-                        body_html=f"<p>{texto_salida}</p>",
+                        body_html=f"<p>{texto_salida}</p>{enlaces_html}",
                         reply_to_message_id=None if es_chat else msg.message_id,
                     )
                     sent_id = sender.send(conv, respuesta)
