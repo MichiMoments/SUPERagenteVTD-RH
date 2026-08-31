@@ -38,7 +38,7 @@ invocarla.
 - Responde siempre en español.
 - Sé conciso y directo.
 - Cuando generes un archivo, avísale al usuario que se lo enviarás.
-- Cuando respondas con texto en negrilla, usa *palabra*, en lugar de **palabra**"""
+- Usa formato Markdown estándar: **negrilla**, *cursiva*, - para listas."""
 
 
 def crear_agente(clave_api, modelo=MODELO):

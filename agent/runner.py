@@ -9,6 +9,9 @@ import json
 import logging
 import os
 import time
+from html import escape as _html_escape
+
+import markdown as _md
 
 from teams_core.config import TeamsConfig
 from teams_core.auth.provider import MsalTokenProvider
@@ -55,6 +58,11 @@ def _enriquecer_input(texto, adjuntos):
         ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
         partes.append(f"[Archivo adjunto: {nombre} ({ext}), ruta: {ruta}]")
     return "\n".join(partes)
+
+
+def _md_a_html(texto):
+    """Convierte Markdown del agente a HTML apto para Teams."""
+    return _md.markdown(texto, extensions=["nl2br"])
 
 
 def _extraer_texto(content):
@@ -199,7 +207,7 @@ def main():
                         enlaces_html = _formatear_enlaces(refs)
 
                     respuesta = OutboundMessage(
-                        body_html=f"<p>{texto_salida}</p>{enlaces_html}",
+                        body_html=f"{_md_a_html(texto_salida)}{enlaces_html}",
                         reply_to_message_id=None if es_chat else msg.message_id,
                     )
                     sent_id = sender.send(conv, respuesta)
@@ -212,7 +220,7 @@ def main():
                     logger.error("Error procesando mensaje %s: %s", msg.message_id, e)
                     try:
                         err_id = sender.send(conv, OutboundMessage(
-                            body_html=f"<p>Hubo un error procesando tu solicitud: {e}</p>",
+                            body_html=f"<p>Hubo un error procesando tu solicitud: {_html_escape(str(e))}</p>",
                             reply_to_message_id=None if es_chat else msg.message_id,
                         ))
                         ids_enviados.add(err_id)

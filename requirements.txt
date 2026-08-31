@@ -6,6 +6,7 @@ langchain>=0.3
 langchain-google-genai>=2.0
 langgraph>=0.4
 python-dotenv>=1.0
+markdown>=3.5
 teams_core @ git+https://github.com/MichiMoments/MiddlewareTeams.git@main
 
 #pip install --force-reinstall --no-deps git+https://github.com/MichiMoments/MiddlewareTeams.git@main
