@@ -28,7 +28,7 @@ from agent.bot import crear_agente
 logger = logging.getLogger(__name__)
 
 INTERVALO_POLLING = int(os.environ.get("POLLING_INTERVAL", "10"))
-INTERVALO_REFRESCO_CHATS = int(os.environ.get("CHAT_REFRESH_INTERVAL", "60"))
+INTERVALO_REFRESCO_CHATS = int(os.environ.get("CHAT_REFRESH_INTERVAL", "10"))
 STAGING_DIR = os.path.join(os.path.dirname(__file__), "..", "output", ".staging")
 MAX_IDS_ENVIADOS = 5000
 MAX_HISTORIAL_POR_CHAT = 50
@@ -212,9 +212,10 @@ def main():
                 nuevos_chats = _obtener_chats(client)
                 for chat_id, conv in nuevos_chats.items():
                     if chat_id not in chats_activos:
-                        ultimo_visto[chat_id] = _inicializar_chat(reader, conv)
+                        ultimo_visto[chat_id] = None
                         chats_activos[chat_id] = conv
                         logger.info("Nuevo chat descubierto: %s", chat_id[:12])
+                logger.info("Chats actualizados: %d activos", len(chats_activos))
                 ultima_actualizacion_chats = ahora
             except Exception as e:
                 logger.error("Error actualizando lista de chats: %s", e)
@@ -230,6 +231,10 @@ def main():
                     if msg.message_id in ids_enviados:
                         continue
                     if msg.author.is_application:
+                        continue
+                    if not msg.author.display_name:
+                        continue
+                    if not msg.text or not msg.text.strip():
                         continue
                     nuevos.append(msg)
 
