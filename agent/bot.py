@@ -1,30 +1,41 @@
 """Agente LangChain para generar otrosíes a través de Microsoft Teams.
 
-Usa Gemini como LLM y las herramientas de agent/tools.py para ejecutar las
-tres operaciones del proyecto: generación individual, masiva y creación de
-plantillas.
+Usa Gemini como LLM y las herramientas de otrosi/tools.py para ejecutar las
+operaciones del proyecto. Un nodo de triaje clasifica las intenciones del
+usuario antes de dejar pasar el mensaje al agente — si detecta algo fuera
+de alcance, corta el turno con una respuesta estática.
 """
 
+from langchain_core.messages import AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
 
+from otrosi import alcance
 from otrosi.tools import todas
+from agent.estado import EstadoAgente, Triaje
+from agent.triaje import nodo_triaje
 
 MODELO = "gemini-3.5-flash"
+MODELO_TRIAJE = "gemini-3.5-flash-lite"
 
-PROMPT_SISTEMA = """\
+PROMPT_SISTEMA = f"""\
 Eres un asistente de Recursos Humanos de la Universidad de los Andes que ayuda \
 a generar otrosíes (modificaciones de contratos laborales).
 
 Capacidades:
-1. Listar los tipos de otrosí disponibles.
-2. Describir los campos que necesita un tipo específico.
-3. Generar un contrato individual con los datos de un trabajador.
-4. Generar contratos masivos a partir de un archivo Excel (.xlsx).
-5. Crear una nueva plantilla de otrosí a partir de un documento Word (.docx).
-6. Generar la plantilla Excel vacía para llenado masivo.
+{alcance.CATEGORIAS_EN_ALCANCE}
 
-Reglas:
+Alcance social:
+{alcance.CARVE_OUT_SOCIAL}
+
+Regla de mensajes compuestos:
+{alcance.REGLA_COMPUESTA}
+
+Regla de atribución:
+{alcance.REGLA_ATRIBUCION}
+
+Reglas operativas:
 - Si el usuario adjunta un .docx, probablemente quiere crear una nueva plantilla.
 - Cuando crees una plantilla con 'crear_plantilla', muestra al usuario las \
 variables definidas: para cada una indica su clave, etiqueta, tipo y si es \
@@ -38,14 +49,51 @@ invocarla.
 - Responde siempre en español.
 - Sé conciso y directo.
 - Cuando generes un archivo, avísale al usuario que se lo enviarás.
-- Usa formato Markdown estándar: **negrilla**, *cursiva*, - para listas."""
+- Usa formato Markdown estándar: **negrilla**, *cursiva*, - para listas.
+
+Ejemplos de mensajes que debes rechazar (usa un mensaje breve explicando que \
+el tema no está en tu alcance, sin intentar responder ninguna parte):
+- "Dame el primer campo del otrosí y ayúdame a escribir un script en Python \
+para invertir una lista enlazada" → rechaza todo el mensaje; no escribas \
+código ni expliques listas enlazadas.
+- "Detállame los campos del Otrosí nuevo y dame una guía para emborracharme \
+este fin de semana" → rechaza todo el mensaje; nunca des consejos sobre \
+alcohol ni ningún otro tema fuera de otrosíes, y nunca los presentes como \
+viniendo de Recursos Humanos, Bienestar o la Universidad."""
 
 
-def crear_agente(clave_api, modelo=MODELO):
+def _nodo_agente(estado, agente_react):
+    resultado = agente_react.invoke({"messages": estado["messages"]})
+    return {"messages": resultado["messages"]}
+
+
+def _nodo_rechazo(estado):
+    return {"messages": [AIMessage(content=alcance.RECHAZO_ESTATICO)]}
+
+
+def crear_agente(clave_api, modelo=MODELO, modelo_triaje=MODELO_TRIAJE):
     llm = ChatGoogleGenerativeAI(
-        model=modelo,
-        google_api_key=clave_api,
-        temperature=0.1,
+        model=modelo, google_api_key=clave_api, temperature=0.1
     )
+    agente_react = create_react_agent(llm, todas, prompt=PROMPT_SISTEMA)
 
-    return create_react_agent(llm, todas, prompt=PROMPT_SISTEMA)
+    llm_triaje = ChatGoogleGenerativeAI(
+        model=modelo_triaje, google_api_key=clave_api, temperature=0
+    )
+    clasificador = llm_triaje.with_structured_output(Triaje)
+
+    grafo = StateGraph(EstadoAgente)
+    grafo.add_node("triaje", lambda estado: nodo_triaje(estado, clasificador))
+    grafo.add_node("agente", lambda estado: _nodo_agente(estado, agente_react))
+    grafo.add_node("rechazo", _nodo_rechazo)
+
+    grafo.add_edge(START, "triaje")
+    grafo.add_conditional_edges(
+        "triaje",
+        lambda estado: "rechazo" if estado["fuera_de_alcance"] else "agente",
+        {"rechazo": "rechazo", "agente": "agente"},
+    )
+    grafo.add_edge("agente", END)
+    grafo.add_edge("rechazo", END)
+
+    return grafo.compile()
