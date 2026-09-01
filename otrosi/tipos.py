@@ -10,9 +10,9 @@ import re
 from pathlib import Path
 
 from . import documento
-from core import RAIZ
+from . import RAIZ
 
-DIRECTORIO = RAIZ / "plantillas"
+DIRECTORIO = Path(__file__).resolve().parent / "plantillas"
 PERSONALIZADAS = DIRECTORIO / "personalizadas"
 
 TIPOS_CAMPO = ("texto", "cedula", "entero", "fecha", "lista")

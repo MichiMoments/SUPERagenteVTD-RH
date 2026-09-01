@@ -7,14 +7,14 @@ from datetime import date
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
-from core import campos
-from core import documento
-from core import ia
-from core import masivo
-from core import tipos
-from core import transcripcion
+from otrosi import campos
+from otrosi import documento
+from otrosi import ia
+from otrosi import masivo
+from otrosi import tipos
+from otrosi import transcripcion
 
-from core.campos import FECHA_MAXIMA, FECHA_MINIMA
+from otrosi.campos import FECHA_MAXIMA, FECHA_MINIMA
 
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

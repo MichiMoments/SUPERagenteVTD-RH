@@ -1,4 +1,4 @@
-"""Herramientas LangChain que envuelven las funciones puras de core/.
+"""Herramientas LangChain que envuelven las funciones puras de otrosi/.
 
 Cada herramienta tiene un docstring en español que Gemini usa para decidir
 cuál invocar. Los bytes (docx, xlsx, zip) se devuelven codificados en base64
@@ -12,7 +12,7 @@ from datetime import date
 
 from langchain_core.tools import tool
 
-from core import campos, documento, ia, masivo, tipos, transcripcion
+from otrosi import campos, documento, ia, masivo, tipos, transcripcion
 
 
 @tool

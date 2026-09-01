@@ -15,9 +15,9 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.shared import Emu, Inches, Pt
 
-from core import RAIZ
+from . import RAIZ
 
-_PLANTILLAS = RAIZ / "plantillas"
+_PLANTILLAS = Path(__file__).resolve().parent / "plantillas"
 
 LOGO = _PLANTILLAS / "LogoUninades.png"
 
