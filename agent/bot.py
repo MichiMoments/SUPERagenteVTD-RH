@@ -8,7 +8,7 @@ plantillas.
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 
-from agent.tools import todas
+from otrosi.tools import todas
 
 MODELO = "gemini-3.5-flash"
 
