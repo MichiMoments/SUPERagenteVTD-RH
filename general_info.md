@@ -611,8 +611,8 @@ new non-UI caller has to do the same.**
 
 A second interface, independent of the Streamlit app, that exposes the same `core/`
 capabilities through a Microsoft Teams chat. The agent runs as a **polling loop** that
-reads messages from a Teams chat via Microsoft Graph, invokes a LangChain/LangGraph
-ReAct agent to decide intent, and sends the response back.
+reads messages from all Teams chats the bot user participates in via Microsoft Graph,
+invokes a LangChain/LangGraph ReAct agent to decide intent, and sends the response back.
 
 ### Architecture
 
@@ -690,7 +690,6 @@ in `run_agent.py`). There is no `.env.example` — create it manually:
 | Variable | Required | Purpose |
 |---|---|---|
 | `GEMINI_API_KEY` | Yes | Google Gemini API key (model: `gemini-3.5-flash`) |
-| `TEAMS_CHAT_ID` | Yes | The Teams chat ID to poll for messages |
 | `TEAMS_TENANT_ID` | Yes | Azure AD tenant ID |
 | `TEAMS_CLIENT_ID` | Yes | Azure AD app registration client ID |
 | `TEAMS_CLIENT_SECRET` | Yes | Azure AD client secret |
@@ -702,6 +701,7 @@ in `run_agent.py`). There is no `.env.example` — create it manually:
 | `TEAMS_LIFECYCLE_URL` | Yes | Webhook URL for Teams lifecycle notifications |
 | `TEAMS_CLIENT_STATE` | Yes | Shared secret for validating Teams webhook callbacks |
 | `POLLING_INTERVAL` | No | Seconds between polling cycles (default: `10`) |
+| `CHAT_REFRESH_INTERVAL` | No | Seconds between chat-list refreshes (default: `60`) |
 
 ### The agent (LLM)
 
@@ -750,13 +750,21 @@ directory is gitignored.
 
 ### Polling loop details (`agent/runner.py`)
 
-- Reads `reader.history(conv, limit=20)` every `POLLING_INTERVAL` seconds.
-- Tracks `ultimo_visto` (last seen message ID) — only processes messages newer than it.
+- On startup, discovers all chats via `GraphClient.paged("/me/chats")` and initializes
+  a per-chat watermark (`ultimo_visto`) by reading the latest message in each chat.
+- Every `CHAT_REFRESH_INTERVAL` seconds (default 60), re-fetches the chat list to
+  discover new conversations (newly discovered chats are lazy-initialized).
+- Every `POLLING_INTERVAL` seconds (default 10), polls each known chat with
+  `reader.history(conv, limit=20)` and processes only messages newer than that
+  chat's watermark.
 - Tracks `ids_enviados` — skips messages sent by the bot itself.
 - Skips messages where `author.is_application` is `True`.
-- Maintains per-chat conversation history (last 20 messages) for context.
-- `ConversationKind.CHAT` does not support `reply_to_message_id` — replies go as new
-  messages. Channels support threaded replies.
+- Maintains per-chat conversation history (last 20 messages) for agent context.
+- Per-chat error isolation — one failing chat does not stop others.
+- Memory pruning: `ids_enviados` is cleared when it exceeds 5000 entries; per-chat
+  history is trimmed to 50 messages.
+- Replies are sent to `msg.conversation` (the chat the message came from), not a
+  global conversation reference.
 
 ## Running it
 

@@ -2,6 +2,7 @@
 
 Usa teams_core para la lectura y envío de mensajes por Microsoft Graph.
 El agente decide qué herramienta invocar según el mensaje del usuario.
+Escucha todos los chats en los que participa el usuario autenticado.
 """
 
 import base64
@@ -27,7 +28,10 @@ from agent.bot import crear_agente
 logger = logging.getLogger(__name__)
 
 INTERVALO_POLLING = int(os.environ.get("POLLING_INTERVAL", "10"))
+INTERVALO_REFRESCO_CHATS = int(os.environ.get("CHAT_REFRESH_INTERVAL", "60"))
 STAGING_DIR = os.path.join(os.path.dirname(__file__), "..", "output", ".staging")
+MAX_IDS_ENVIADOS = 5000
+MAX_HISTORIAL_POR_CHAT = 50
 
 
 def _descargar_adjuntos(mensaje, downloader):
@@ -133,8 +137,40 @@ def _formatear_enlaces(refs):
     return "".join(lineas)
 
 
+def _obtener_chats(client):
+    """Consulta /me/chats y devuelve {chat_id: ConversationRef} para todos los chats."""
+    chats = {}
+    for item in client.paged("/me/chats", params={"$select": "id,chatType"}):
+        chat_id = item.get("id")
+        if not chat_id:
+            continue
+        chats[chat_id] = ConversationRef(kind=ConversationKind.CHAT, chat_id=chat_id)
+    return chats
+
+
+def _inicializar_chat(reader, conv):
+    """Lee el último mensaje de un chat recién descubierto para fijar el watermark."""
+    try:
+        mensajes = reader.history(conv, limit=1)
+        return mensajes[0].message_id if mensajes else None
+    except Exception as e:
+        logger.warning("No se pudo inicializar chat %s: %s", conv.chat_id, e)
+        return None
+
+
+def _podar_estado(ids_enviados, historial_chat):
+    """Previene crecimiento ilimitado de ids_enviados e historial_chat."""
+    if len(ids_enviados) > MAX_IDS_ENVIADOS:
+        logger.info("Podando ids_enviados: %d -> vaciando", len(ids_enviados))
+        ids_enviados.clear()
+
+    for chat_key, historial in historial_chat.items():
+        if len(historial) > MAX_HISTORIAL_POR_CHAT:
+            historial_chat[chat_key] = historial[-MAX_HISTORIAL_POR_CHAT:]
+
+
 def main():
-    """Arranca el loop de polling contra Teams."""
+    """Arranca el loop de polling contra Teams — escucha todos los chats."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -143,10 +179,6 @@ def main():
     clave_api = os.environ.get("GEMINI_API_KEY")
     if not clave_api:
         raise RuntimeError("GEMINI_API_KEY no está configurada en .env")
-
-    chat_id = os.environ.get("TEAMS_CHAT_ID")
-    if not chat_id:
-        raise RuntimeError("TEAMS_CHAT_ID no está configurada en .env")
 
     cfg = TeamsConfig.from_env()
     tokens = MsalTokenProvider(cfg)
@@ -158,79 +190,117 @@ def main():
 
     agente = crear_agente(clave_api)
 
-    conv = ConversationRef(kind=ConversationKind.CHAT, chat_id=chat_id)
-    es_chat = conv.kind == ConversationKind.CHAT
-
+    chats_activos = _obtener_chats(client)
+    ultimo_visto = {}
     historial_chat = {}
     ids_enviados = set()
 
-    mensajes_iniciales = reader.history(conv, limit=20)
-    ultimo_visto = mensajes_iniciales[0].message_id if mensajes_iniciales else None
-    logger.info("Agente iniciado. Polling cada %ds en chat %s (último msg: %s)",
-                INTERVALO_POLLING, chat_id, ultimo_visto)
+    for chat_id, conv in chats_activos.items():
+        ultimo_visto[chat_id] = _inicializar_chat(reader, conv)
+
+    logger.info(
+        "Agente iniciado. Polling cada %ds en %d chats.",
+        INTERVALO_POLLING, len(chats_activos),
+    )
+
+    ultima_actualizacion_chats = time.monotonic()
 
     while True:
-        try:
-            mensajes = reader.history(conv, limit=20)
-            nuevos = []
-            for msg in mensajes:
-                if not ultimo_visto or msg.message_id <= ultimo_visto:
-                    continue
-                if msg.message_id in ids_enviados:
-                    continue
-                if msg.author.is_application:
-                    continue
-                nuevos.append(msg)
+        ahora = time.monotonic()
+        if ahora - ultima_actualizacion_chats >= INTERVALO_REFRESCO_CHATS:
+            try:
+                nuevos_chats = _obtener_chats(client)
+                for chat_id, conv in nuevos_chats.items():
+                    if chat_id not in chats_activos:
+                        ultimo_visto[chat_id] = _inicializar_chat(reader, conv)
+                        chats_activos[chat_id] = conv
+                        logger.info("Nuevo chat descubierto: %s", chat_id[:12])
+                ultima_actualizacion_chats = ahora
+            except Exception as e:
+                logger.error("Error actualizando lista de chats: %s", e)
 
-            for msg in nuevos:
-                logger.info("Mensaje de %s: %s", msg.author.display_name, msg.text[:100])
+        for chat_id, conv in list(chats_activos.items()):
+            try:
+                mensajes = reader.history(conv, limit=20)
+                marca = ultimo_visto.get(chat_id)
+                nuevos = []
+                for msg in mensajes:
+                    if marca and msg.message_id <= marca:
+                        continue
+                    if msg.message_id in ids_enviados:
+                        continue
+                    if msg.author.is_application:
+                        continue
+                    nuevos.append(msg)
 
-                adjuntos = _descargar_adjuntos(msg, downloader)
-                texto_entrada = _enriquecer_input(msg.text or "", adjuntos)
-
-                chat_key = msg.conversation.chat_id or "default"
-                historial = historial_chat.setdefault(chat_key, [])
-
-                try:
-                    from langchain_core.messages import HumanMessage, AIMessage
-
-                    mensajes = historial[-20:] + [HumanMessage(content=texto_entrada)]
-                    resultado = agente.invoke({"messages": mensajes})
-
-                    msgs_salida = resultado.get("messages", [])
-                    texto_salida = _extraer_texto(msgs_salida[-1].content) if msgs_salida else "No pude procesar tu solicitud."
-
-                    archivos = _extraer_archivos(msgs_salida)
-                    enlaces_html = ""
-                    if archivos:
-                        refs = _subir_archivos(archivos, blob_uploader)
-                        enlaces_html = _formatear_enlaces(refs)
-
-                    respuesta = OutboundMessage(
-                        body_html=f"{_md_a_html(texto_salida)}{enlaces_html}",
-                        reply_to_message_id=None if es_chat else msg.message_id,
+                for msg in nuevos:
+                    logger.info(
+                        "[%s] Mensaje de %s: %s",
+                        chat_id[:12], msg.author.display_name,
+                        (msg.text or "")[:100],
                     )
-                    sent_id = sender.send(conv, respuesta)
-                    ids_enviados.add(sent_id)
 
-                    historial.append(HumanMessage(content=texto_entrada))
-                    historial.append(AIMessage(content=texto_salida))
+                    adjuntos = _descargar_adjuntos(msg, downloader)
+                    texto_entrada = _enriquecer_input(msg.text or "", adjuntos)
 
-                except Exception as e:
-                    logger.error("Error procesando mensaje %s: %s", msg.message_id, e)
+                    chat_key = msg.conversation.chat_id or chat_id
+                    historial = historial_chat.setdefault(chat_key, [])
+
+                    msg_conv = msg.conversation
+
                     try:
-                        err_id = sender.send(conv, OutboundMessage(
-                            body_html=f"<p>Hubo un error procesando tu solicitud: {_html_escape(str(e))}</p>",
-                            reply_to_message_id=None if es_chat else msg.message_id,
-                        ))
-                        ids_enviados.add(err_id)
-                    except Exception:
-                        logger.exception("Error enviando mensaje de error")
+                        from langchain_core.messages import HumanMessage, AIMessage
 
-                ultimo_visto = msg.message_id
+                        mensajes_agente = historial[-20:] + [HumanMessage(content=texto_entrada)]
+                        resultado = agente.invoke({"messages": mensajes_agente})
 
-        except Exception as e:
-            logger.error("Error en el loop de polling: %s", e)
+                        msgs_salida = resultado.get("messages", [])
+                        texto_salida = (
+                            _extraer_texto(msgs_salida[-1].content)
+                            if msgs_salida
+                            else "No pude procesar tu solicitud."
+                        )
+
+                        archivos = _extraer_archivos(msgs_salida)
+                        enlaces_html = ""
+                        if archivos:
+                            refs = _subir_archivos(archivos, blob_uploader)
+                            enlaces_html = _formatear_enlaces(refs)
+
+                        respuesta = OutboundMessage(
+                            body_html=f"{_md_a_html(texto_salida)}{enlaces_html}",
+                            reply_to_message_id=None,
+                        )
+                        sent_id = sender.send(msg_conv, respuesta)
+                        ids_enviados.add(sent_id)
+
+                        historial.append(HumanMessage(content=texto_entrada))
+                        historial.append(AIMessage(content=texto_salida))
+
+                    except Exception as e:
+                        logger.error(
+                            "Error procesando mensaje %s en chat %s: %s",
+                            msg.message_id, chat_id[:12], e,
+                        )
+                        try:
+                            err_id = sender.send(
+                                msg_conv,
+                                OutboundMessage(
+                                    body_html=f"<p>Hubo un error procesando tu solicitud: {_html_escape(str(e))}</p>",
+                                    reply_to_message_id=None,
+                                ),
+                            )
+                            ids_enviados.add(err_id)
+                        except Exception:
+                            logger.exception("Error enviando mensaje de error")
+
+                    ultimo_visto[chat_id] = msg.message_id
+
+            except Exception as e:
+                logger.error("Error polling chat %s: %s", chat_id[:12], e)
+                continue
+
+        _podar_estado(ids_enviados, historial_chat)
 
         time.sleep(INTERVALO_POLLING)
 
