@@ -3,14 +3,22 @@
 Mismo patrón que otrosi/tools.py: cada herramienta tiene un docstring en
 español que Gemini usa para decidir cuál invocar, y ninguna deja subir una
 excepción al agente.
+
+``crear_herramientas(sender)`` devuelve las herramientas con notificación
+al canal de Teams cuando se registra una citación.
 """
 
+import logging
+import os
 from datetime import date
+from html import escape as _html_escape
 
 from langchain_core.tools import tool
 
 from citaciones import crud
 from citaciones.models import ESTADOS, Citacion
+
+logger = logging.getLogger(__name__)
 
 
 @tool
@@ -149,3 +157,80 @@ def actualizar_citacion(id_citacion: int, nuevo_estado: str) -> dict:
 
 
 todas = [registrar_citacion, consultar_citaciones, obtener_citacion, actualizar_citacion]
+
+
+def _notificar_canal(sender, citacion_guardada, persona_citada, tipo_citacion,
+                     fecha_citacion, autoridad, registrado_por):
+    from teams_core.domain.models import ConversationRef, ConversationKind, OutboundMessage
+
+    team_id = os.environ.get("TEAMS_CHANNEL_TEAM_ID")
+    channel_id = os.environ.get("TEAMS_CHANNEL_ID")
+    if not team_id or not channel_id:
+        logger.info("Notificación al canal omitida: faltan TEAMS_CHANNEL_TEAM_ID o TEAMS_CHANNEL_ID")
+        return
+    try:
+        conv = ConversationRef(
+            kind=ConversationKind.CHANNEL, team_id=team_id, channel_id=channel_id,
+        )
+        html = (
+            f"<b>Nueva citación registrada</b><br/>"
+            f"<b>Persona citada:</b> {_html_escape(persona_citada)}<br/>"
+            f"<b>Tipo:</b> {_html_escape(tipo_citacion)}<br/>"
+            f"<b>Fecha:</b> {_html_escape(fecha_citacion)}<br/>"
+            f"<b>Autoridad:</b> {_html_escape(autoridad)}<br/>"
+            f"<b>Registrada por:</b> {_html_escape(registrado_por)}<br/>"
+            f"<b>ID:</b> #{citacion_guardada.id}"
+        )
+        sender.send(conv, OutboundMessage(body_html=html))
+        logger.info("Notificación de citación #%s enviada al canal", citacion_guardada.id)
+    except Exception as e:
+        logger.warning("No se pudo enviar notificación al canal: %s", e)
+
+
+def crear_herramientas(sender=None):
+    """Devuelve las herramientas de citaciones, con notificación al canal si hay sender."""
+    if sender is None:
+        return list(todas)
+
+    @tool
+    def registrar_citacion(persona_citada: str, tipo_citacion: str, fecha_citacion: str,
+                            autoridad: str, registrado_por: str) -> dict:
+        """Registra una nueva citación jurisdiccional en la base de datos.
+
+        Úsala cuando el usuario quiera dejar constancia de una citación,
+        emplazamiento o notificación judicial recibida para una persona.
+        Pregunta los datos que falten antes de llamar la herramienta; no
+        inventes valores.
+
+        Args:
+            persona_citada: Nombre completo de la persona o entidad citada.
+            tipo_citacion: Tipo de citación (ej: 'Laboral', 'Civil', 'Embargo').
+            fecha_citacion: Fecha de la citación, formato 'YYYY-MM-DD'.
+            autoridad: Autoridad o jurisdicción que emite la citación (ej: 'Juzgado 3 Laboral de Bogotá').
+            registrado_por: Nombre de quien registra la citación.
+        """
+        try:
+            fecha = date.fromisoformat(fecha_citacion)
+        except ValueError:
+            return {"error": f"Fecha inválida: '{fecha_citacion}'. Usa YYYY-MM-DD."}
+
+        try:
+            citacion = Citacion(
+                persona_citada=persona_citada,
+                tipo_citacion=tipo_citacion,
+                fecha_citacion=fecha,
+                autoridad=autoridad,
+                registrado_por=registrado_por,
+            )
+        except ValueError as e:
+            return {"error": str(e)}
+
+        guardada = crud.crear_citacion(citacion)
+        _notificar_canal(sender, guardada, persona_citada, tipo_citacion,
+                         fecha_citacion, autoridad, registrado_por)
+        return {
+            "id": guardada.id,
+            "mensaje": f"Citación #{guardada.id} registrada para {guardada.persona_citada}.",
+        }
+
+    return [registrar_citacion, consultar_citaciones, obtener_citacion, actualizar_citacion]

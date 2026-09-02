@@ -13,6 +13,7 @@ alcance definido. No respondes al usuario ni ejecutas nada.
 
 Categorías válidas para cada fragmento:
 - "otrosi": {categorias}
+- "citaciones": {categorias_citaciones}
 - "social": {carve_out}
 - "fuera_de_alcance": cualquier otra cosa — cualquier tema, tarea o pregunta \
 que no encaje en las dos categorías anteriores, sin importar cuán \
@@ -52,6 +53,7 @@ def nodo_triaje(estado, clasificador):
     triaje: Triaje = clasificador.invoke(
         PROMPT_TRIAJE.format(
             categorias=alcance.CATEGORIAS_EN_ALCANCE,
+            categorias_citaciones=alcance.CATEGORIAS_CITACIONES,
             carve_out=alcance.CARVE_OUT_SOCIAL,
             historial=historial,
             mensaje=extraer_texto(mensajes[-1].content),

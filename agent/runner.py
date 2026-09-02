@@ -174,7 +174,7 @@ def main():
     downloader = GraphFileDownloader(client)
     blob_uploader = BlobStorageUploader(cfg)
 
-    agente = crear_agente(clave_api)
+    agente = crear_agente(clave_api, sender=sender)
 
     chats_activos = _obtener_chats(client)
     ultimo_visto = {}

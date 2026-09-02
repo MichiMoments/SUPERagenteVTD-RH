@@ -27,11 +27,12 @@ thing together: **UI layers live only at the top.** Acyclic, no inverted depende
 
 ```
 otrosi_app_frontend.py  Streamlit UI (three tabs) -> otrosi/*
-agent/runner.py   Teams polling loop             -> agent/bot, otrosi/tools, teams_core
-agent/bot.py      LangGraph ReAct agent          -> otrosi/tools
+agent/runner.py   Teams polling loop             -> agent/bot, otrosi/tools, citaciones/tools, teams_core
+agent/bot.py      LangGraph ReAct agent          -> otrosi/tools, citaciones/tools
 
 otrosi/           (formerly core/)
   tools.py        @tool wrappers                 -> otrosi/{campos,documento,ia,masivo,tipos,transcripcion}
+  alcance.py      Scope contract (categories, rules, rejection text)
   masivo.py       Excel <-> payloads + .zip      -> tipos, campos, documento
   tipos.py        type descriptors on disk       -> documento
   documento.py    marcadores -> Markdown -> docx -> (nothing)
@@ -39,6 +40,13 @@ otrosi/           (formerly core/)
   transcripcion.py .docx de Word -> Markdown     -> documento, campos
   ia.py           infiere campos con Gemini      -> tipos
   plantillas/     LogoUninades.png, built-in .md/.json, personalizadas/
+
+citaciones/       PostgreSQL-backed citations tracker
+  models.py       Citacion dataclass + ESTADOS   -> (nothing)
+  db.py           Lazy connection pool           -> psycopg2 (DATABASE_URL)
+  crud.py         4 SQL CRUD functions           -> db, models
+  tools.py        4 @tool wrappers + factory     -> crud, models, teams_core (optional)
+  schema.sql      DDL: CREATE TABLE + indexes
 ```
 
 Both `otrosi_app_frontend.py` (Streamlit) and `agent/` (Teams) are **independent
@@ -634,17 +642,33 @@ agent/
                       Also uploads generated files to Azure Blob Storage
                       (teams_core.adapters.blob.storage.BlobStorageUploader)
                       and links them in the reply instead of attaching bytes.
-  bot.py              Agent constructor: create_react_agent(Gemini, tools, prompt)
+                      Passes `sender` to `crear_agente` for channel notifications.
+  bot.py              Agent constructor: crear_agente(clave_api, sender=None)
+                      Merges otrosi + citaciones tools, builds StateGraph
+                      with triage → agent/rejection routing.
+  triaje.py           Intent classifier (structured output → Triaje).
+                      Four categories: "otrosi", "citaciones", "social",
+                      "fuera_de_alcance".
+  estado.py           Pydantic state: Intencion, Triaje, EstadoAgente.
+  util_mensajes.py    Extract text from AIMessage content.
   __init__.py         (empty)
 otrosi/
   tools.py            Six @tool wrappers around otrosi/ functions (moved here
                       from agent/tools.py in the core/ -> otrosi/ reorg)
+  alcance.py          Single source of truth for agent scope: CATEGORIAS_EN_ALCANCE
+                      (otrosí, 5 items), CATEGORIAS_CITACIONES (4 items),
+                      CARVE_OUT_SOCIAL, REGLA_COMPUESTA, REGLA_ATRIBUCION,
+                      RECHAZO_ESTATICO.
+citaciones/
+  tools.py            Four @tool wrappers + `crear_herramientas(sender)` factory.
+                      When sender is provided, `registrar_citacion` sends an
+                      HTML notification to a Teams channel on success.
 ```
 
 The **design principle** is the same as the Streamlit app: the agent layer is a thin
-adapter. All business logic lives in `otrosi/`. The LLM **never receives file content**
-— it only decides intent from the text message. File handling (download, generation,
-saving, blob upload) is deterministic in the runner.
+adapter. All business logic lives in `otrosi/` and `citaciones/`. The LLM **never
+receives file content** — it only decides intent from the text message. File handling
+(download, generation, saving, blob upload) is deterministic in the runner.
 
 ### Middleware: `teams_core`
 
@@ -725,6 +749,9 @@ in `run_agent.py`). There is no `.env.example` — create it manually:
 | `TEAMS_LIFECYCLE_URL` | Yes | Webhook URL for Teams lifecycle notifications |
 | `TEAMS_CLIENT_STATE` | Yes | Shared secret for validating Teams webhook callbacks |
 | `STORAGE_ACCOUNT_CONNECTION_STRING` | Yes | Azure Blob container URL/SAS read by `BlobStorageUploader` |
+| `DATABASE_URL` | Yes (citaciones) | PostgreSQL connection string (e.g. `postgresql://citaciones:citaciones@localhost:5432/citaciones`) |
+| `TEAMS_CHANNEL_TEAM_ID` | No | Team ID for citation channel notifications (omit to skip notifications) |
+| `TEAMS_CHANNEL_ID` | No | Channel ID for citation channel notifications (omit to skip notifications) |
 | `POLLING_INTERVAL` | No | Seconds between polling cycles (default: `10`) |
 | `CHAT_REFRESH_INTERVAL` | No | Seconds between chat-list refreshes (default: `60`) |
 
@@ -732,16 +759,22 @@ in `run_agent.py`). There is no `.env.example` — create it manually:
 
 - **Model:** `gemini-3.5-flash` via `langchain-google-genai` (`ChatGoogleGenerativeAI`,
   temperature 0.1).
+- **Triage model:** `gemini-3.5-flash-lite` (temperature 0) — classifies user intent via
+  structured output into four categories: `"otrosi"`, `"citaciones"`, `"social"`,
+  `"fuera_de_alcance"`. If any fragment is out of scope, the entire turn is short-circuited
+  to a static rejection message (`alcance.RECHAZO_ESTATICO`).
 - **Framework:** `langgraph.prebuilt.create_react_agent` — a ReAct loop that decides
   which tool to call based on the user's message.
+- **Graph:** `StateGraph(EstadoAgente)` with three nodes: `triaje` → `agente` / `rechazo`.
+  Routing is binary: `fuera_de_alcance` → rejection, else → agent with all 10 tools.
 - **System prompt** (`agent/bot.py`): Spanish-language HR assistant persona for
   Universidad de los Andes. Key rules: `.docx` attachment → template creation;
-  `.xlsx` attachment → bulk generation; ask for missing data before calling tools.
+  `.xlsx` attachment → bulk generation; confirm citation data before saving;
+  ask for missing data before calling tools.
 
-### Tools (`otrosi/tools.py`)
+### Tools — otrosíes (`otrosi/tools.py`)
 
-Six `@tool`-decorated functions, all delegating to `otrosi/` (this file used to be
-`agent/tools.py`; it moved when `core/` became `otrosi/`):
+Six `@tool`-decorated functions, all delegating to `otrosi/`:
 
 | Tool | Input | Output |
 |---|---|---|
@@ -751,6 +784,19 @@ Six `@tool`-decorated functions, all delegating to `otrosi/` (this file used to 
 | `generar_masivo(tipo_id, xlsx_ruta)` | type + **file path** | Saves `.zip` to `output/`, returns `{ruta}` |
 | `crear_plantilla(docx_ruta)` | **file path** | Saves template, returns `{variables}` with defined fields |
 | `plantilla_excel(tipo_id)` | type slug | `{xlsx_base64}` |
+
+### Tools — citaciones (`citaciones/tools.py`)
+
+Four `@tool`-decorated functions, all delegating to `citaciones/crud.py`. Wired into the
+agent via `crear_herramientas(sender)` — a factory that returns tool instances; when
+`sender` is provided, `registrar_citacion` sends a channel notification on success.
+
+| Tool | Input | Output |
+|---|---|---|
+| `registrar_citacion(persona_citada, tipo_citacion, fecha_citacion, autoridad, registrado_por)` | 5 strings (fecha as `YYYY-MM-DD`) | `{id, mensaje}` + channel notification |
+| `consultar_citaciones(estado, tipo_citacion, desde, hasta)` | optional filters | Formatted Markdown list |
+| `obtener_citacion(id_citacion)` | citation ID | Full detail dict |
+| `actualizar_citacion(id_citacion, nuevo_estado)` | ID + new state | `{id, estado, mensaje}` |
 
 `generar_masivo` and `crear_plantilla` accept **local file paths** (not base64) because
 the runner downloads attachments to `output/.staging/` before invoking the agent. The
@@ -792,23 +838,137 @@ directory is gitignored.
 - Replies are sent to `msg.conversation` (the chat the message came from), not a
   global conversation reference.
 
-## Citaciones (in progress, branch `citaciones`)
+## Citaciones (`citaciones/`)
 
-A second capability being bolted onto the same Teams agent: a PostgreSQL-backed
-tracker for jurisdiction citations (`citaciones`), registered/queried/updated through
-the same chat, with a Teams **channel** notification on new registrations. The full
-design — file layout, tool list, `bot.py`/`runner.py` wiring, new env vars
-(`DATABASE_URL`, `TEAMS_CHANNEL_TEAM_ID`, `TEAMS_CHANNEL_ID`), and the
-`psycopg2-binary` dependency — is written up in
-[citaciones_plan.md](citaciones_plan.md); read that file rather than this summary for
-current status, since it is the one actively being executed against.
+A second capability integrated into the same Teams agent: a PostgreSQL-backed tracker
+for jurisdiction citations, registered/queried/updated through the same chat, with a
+Teams **channel** notification on new registrations. The original design plan lives in
+[citaciones_plan.md](citaciones_plan.md).
 
-As of this writing, `citaciones/` is a package with only an empty `__init__.py` —
-none of the plan's `models.py`/`db.py`/`crud.py`/`tools.py`/`schema.sql` exist yet, and
-`otrosi/bot.py`'s `crear_agente` still takes only `clave_api` (no `sender=` param). The
-same layering rule as `otrosi/` should hold once it lands: business logic (SQL, models)
-stays out of Streamlit/Teams-specific code, and `citaciones/tools.py` should be a thin
-`@tool` wrapper, mirroring `otrosi/tools.py`.
+**Status:** Phase 3 complete (agent integration). Phase 4 (end-to-end testing) pending.
+
+### Package layout
+
+```
+citaciones/
+  __init__.py       (empty)
+  models.py         Dataclass `Citacion` with 9 fields + `desde_fila()` row converter.
+                    ESTADOS = ('pendiente', 'atendida', 'vencida') — CHECK constraint,
+                    not ENUM. Validates estado in __post_init__.
+  db.py             Lazy SimpleConnectionPool(1, 5), reads DATABASE_URL from env.
+                    get_conn() / put_conn() for try/finally connection management.
+  crud.py           4 parameterized SQL functions (%s, no concatenation):
+                    crear_citacion, buscar_citaciones, obtener_citacion, actualizar_estado.
+  tools.py          4 LangChain @tool wrappers + `crear_herramientas(sender)` factory +
+                    `_notificar_canal` helper for Teams channel notifications.
+  schema.sql        CREATE TABLE IF NOT EXISTS citaciones + 2 indexes
+                    (estado+fecha, tipo).
+  consulta_db.py    Standalone diagnostic: prints all tables and rows from PostgreSQL.
+                    Run with: python -m citaciones.consulta_db
+```
+
+### Agent integration (phase 3)
+
+The agent now handles both otrosíes and citaciones through a single LangGraph graph:
+
+- **Triage** (`agent/triaje.py`): four intent categories — `"otrosi"`, `"citaciones"`,
+  `"social"`, `"fuera_de_alcance"`. Both `"otrosi"` and `"citaciones"` route to the
+  agent node; only `"fuera_de_alcance"` triggers rejection.
+- **Scope contract** (`otrosi/alcance.py`): `CATEGORIAS_EN_ALCANCE` (items 1-5, otrosí)
+  and `CATEGORIAS_CITACIONES` (items 6-9). `REGLA_COMPUESTA`, `REGLA_ATRIBUCION` and
+  `RECHAZO_ESTATICO` cover both domains.
+- **State** (`agent/estado.py`): `Intencion.categoria` is a `Literal` with all four
+  categories.
+- **Bot** (`agent/bot.py`): `crear_agente(clave_api, sender=None)` merges
+  `herramientas_otrosi` (6 tools) + `herramientas_citaciones` (4 tools) = 10 tools.
+  `PROMPT_SISTEMA` has separate operational rules for each domain.
+- **Runner** (`agent/runner.py`): passes `sender=sender` to `crear_agente` so that
+  `registrar_citacion` can send channel notifications.
+- **Factory pattern** (`citaciones/tools.py`): `crear_herramientas(sender)` returns
+  tool instances. When `sender` is provided, `registrar_citacion` is redefined inside
+  a closure that calls `_notificar_canal` after a successful insert. The other 3 tools
+  need no sender and stay at module level.
+- **Channel notification** (`_notificar_canal`): reads `TEAMS_CHANNEL_TEAM_ID` and
+  `TEAMS_CHANNEL_ID` from env at call time. If either is missing, logs and returns
+  silently (graceful degradation). Builds an HTML summary of the new citation
+  (HTML-escaped) and sends via `sender.send(ConversationRef(CHANNEL, ...), OutboundMessage(...))`.
+  Failure is caught and logged — never breaks the tool response.
+
+### Data flow
+
+```
+Save:
+  User (Teams) → triage ("citaciones") → agent → registrar_citacion tool
+    → crud.crear_citacion → INSERT INTO citaciones RETURNING *
+    → _notificar_canal → sender.send to Teams channel (optional)
+    → {id, mensaje} → agent response → Teams reply
+
+Retrieve:
+  User (Teams) → triage ("citaciones") → agent → consultar_citaciones / obtener_citacion
+    → crud.buscar_citaciones / obtener_citacion → SELECT ... → formatted results
+
+Update:
+  User (Teams) → triage ("citaciones") → agent → actualizar_citacion
+    → crud.actualizar_estado → UPDATE ... SET estado RETURNING * → confirmation
+```
+
+### PostgreSQL setup (Docker)
+
+Create and start the container:
+
+```powershell
+docker run -d --name citaciones-test -e POSTGRES_USER=citaciones -e POSTGRES_PASSWORD=citaciones -e POSTGRES_DB=citaciones -p 5432:5432 postgres:16
+```
+
+Apply the schema (PowerShell — `<` redirect is not supported, use pipe):
+
+```powershell
+Get-Content citaciones\schema.sql | docker exec -i citaciones-test psql -U citaciones -d citaciones
+```
+
+Add to `.env`:
+
+```
+DATABASE_URL=postgresql://citaciones:citaciones@localhost:5432/citaciones
+```
+
+Verify with the diagnostic script:
+
+```powershell
+venv\Scripts\python -m citaciones.consulta_db
+```
+
+CRUD smoke test from the project root:
+
+```powershell
+venv\Scripts\python -c "
+from dotenv import load_dotenv; load_dotenv()
+from datetime import date
+from citaciones.models import Citacion
+from citaciones import crud
+
+c = crud.crear_citacion(Citacion(
+    persona_citada='Juan Perez',
+    tipo_citacion='Laboral',
+    fecha_citacion=date(2026, 9, 15),
+    autoridad='Juzgado 3 Laboral de Bogota',
+    registrado_por='David Perez',
+))
+print(f'Creada: #{c.id}')
+print(crud.buscar_citaciones())
+print(crud.obtener_citacion(c.id))
+crud.actualizar_estado(c.id, 'atendida')
+print(crud.obtener_citacion(c.id))
+"
+```
+
+### Dependencies
+
+`psycopg2-binary>=2.9` is declared in `requirements.txt`. Install with:
+
+```powershell
+venv\Scripts\pip install psycopg2-binary
+```
 
 `datos_prueba/` (gitignored) holds sample `.docx`/`.xlsx` files used for manual testing
 of bulk generation and template transcription — not a fixtures directory read by any
