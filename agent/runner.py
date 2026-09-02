@@ -24,6 +24,7 @@ from teams_core.adapters.blob.storage import BlobStorageUploader
 from teams_core.domain.models import ConversationRef, ConversationKind, OutboundMessage
 
 from agent.bot import crear_agente
+from agent.util_mensajes import extraer_texto as _extraer_texto
 
 logger = logging.getLogger(__name__)
 
@@ -67,21 +68,6 @@ def _enriquecer_input(texto, adjuntos):
 def _md_a_html(texto):
     """Convierte Markdown del agente a HTML apto para Teams."""
     return _md.markdown(texto, extensions=["nl2br"])
-
-
-def _extraer_texto(content):
-    """Extrae texto plano del content de un AIMessage (puede ser str o lista de bloques)."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        partes = []
-        for bloque in content:
-            if isinstance(bloque, dict) and bloque.get("type") == "text":
-                partes.append(bloque.get("text", ""))
-            elif isinstance(bloque, str):
-                partes.append(bloque)
-        return "\n".join(partes)
-    return str(content)
 
 
 def _extraer_archivos(mensajes):
