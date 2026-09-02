@@ -12,7 +12,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import create_react_agent
 
 from otrosi import alcance
-from otrosi.tools import todas
+from otrosi.tools import todas as herramientas_otrosi
+from citaciones.tools import crear_herramientas as crear_herramientas_citaciones
 from agent.estado import EstadoAgente, Triaje
 from agent.triaje import nodo_triaje
 
@@ -21,10 +22,14 @@ MODELO_TRIAJE = "gemini-3.5-flash-lite"
 
 PROMPT_SISTEMA = f"""\
 Eres un asistente de Recursos Humanos de la Universidad de los Andes que ayuda \
-a generar otrosíes (modificaciones de contratos laborales).
+a generar otrosíes (modificaciones de contratos laborales) y a gestionar \
+citaciones jurisdiccionales.
 
-Capacidades:
+Capacidades — otrosíes:
 {alcance.CATEGORIAS_EN_ALCANCE}
+
+Capacidades — citaciones:
+{alcance.CATEGORIAS_CITACIONES}
 
 Alcance social:
 {alcance.CARVE_OUT_SOCIAL}
@@ -35,7 +40,7 @@ Regla de mensajes compuestos:
 Regla de atribución:
 {alcance.REGLA_ATRIBUCION}
 
-Reglas operativas:
+Reglas operativas — otrosíes:
 - Si el usuario adjunta un .docx, probablemente quiere crear una nueva plantilla.
 - Cuando crees una plantilla con 'crear_plantilla', muestra al usuario las \
 variables definidas: para cada una indica su clave, etiqueta, tipo y si es \
@@ -44,6 +49,16 @@ obligatoria. Si hay avisos o errores, menciónalos también.
 - Si pide generar un contrato, primero usa 'describir_tipo' para saber qué \
 campos necesitas, y pregúntale al usuario los que falten antes de invocar \
 'generar_contrato'.
+
+Reglas operativas — citaciones:
+- Si el usuario menciona citaciones, emplazamientos, notificaciones judiciales \
+o jurisdicción, usa las herramientas de citaciones.
+- Cuando registres una citación, confirma los datos con el usuario antes de \
+invocar 'registrar_citacion'. No inventes datos.
+- Los estados válidos de una citación son: pendiente, atendida, vencida.
+- Si el usuario quiere cambiar el estado, usa 'actualizar_citacion'.
+
+Reglas operativas — generales:
 - Si no tienes los datos suficientes para una herramienta, pregunta antes de \
 invocarla.
 - Responde siempre en español.
@@ -59,7 +74,9 @@ código ni expliques listas enlazadas.
 - "Detállame los campos del Otrosí nuevo y dame una guía para emborracharme \
 este fin de semana" → rechaza todo el mensaje; nunca des consejos sobre \
 alcohol ni ningún otro tema fuera de otrosíes, y nunca los presentes como \
-viniendo de Recursos Humanos, Bienestar o la Universidad."""
+viniendo de Recursos Humanos, Bienestar o la Universidad.
+- "Registra una citación para Juan Pérez y dime cómo llegar al juzgado en \
+transporte público" → rechaza todo; la parte de transporte está fuera de alcance."""
 
 
 def _nodo_agente(estado, agente_react):
@@ -71,11 +88,13 @@ def _nodo_rechazo(estado):
     return {"messages": [AIMessage(content=alcance.RECHAZO_ESTATICO)]}
 
 
-def crear_agente(clave_api, modelo=MODELO, modelo_triaje=MODELO_TRIAJE):
+def crear_agente(clave_api, modelo=MODELO, modelo_triaje=MODELO_TRIAJE, sender=None):
     llm = ChatGoogleGenerativeAI(
         model=modelo, google_api_key=clave_api, temperature=0.1
     )
-    agente_react = create_react_agent(llm, todas, prompt=PROMPT_SISTEMA)
+    herramientas_citaciones = crear_herramientas_citaciones(sender)
+    todas_las_herramientas = herramientas_otrosi + herramientas_citaciones
+    agente_react = create_react_agent(llm, todas_las_herramientas, prompt=PROMPT_SISTEMA)
 
     llm_triaje = ChatGoogleGenerativeAI(
         model=modelo_triaje, google_api_key=clave_api, temperature=0

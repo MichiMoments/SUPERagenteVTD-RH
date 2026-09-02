@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 class Intencion(BaseModel):
     texto: str
-    categoria: Literal["otrosi", "social", "fuera_de_alcance"]
+    categoria: Literal["otrosi", "citaciones", "social", "fuera_de_alcance"]
 
 
 class Triaje(BaseModel):
