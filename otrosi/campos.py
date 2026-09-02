@@ -59,6 +59,19 @@ def revisar(tipo, datos):
         valor = datos.get(campo["clave"])
         if campo["tipo"] == "texto" and isinstance(valor, str):
             errores.extend(_revisar_texto(campo, valor.strip()))
+        if campo["tipo"] in ("cedula", "entero") and valor is not None:
+            try:
+                numero = _entero(valor)
+            except ValueError as e:
+                errores.append(f"«{campo['etiqueta']}»: {e}")
+                continue
+            if campo["tipo"] == "cedula":
+                digitos = len(str(numero))
+                if digitos < 8 or digitos > 10:
+                    errores.append(
+                        f"«{campo['etiqueta']}»: la cédula debe tener entre 8 y 10 dígitos, "
+                        f"tiene {digitos}"
+                    )
         if campo["no_futura"] and isinstance(valor, date) and valor > date.today():
             errores.append(
                 f"«{campo['etiqueta']}»: es una fecha futura; el contrato que se modifica "
