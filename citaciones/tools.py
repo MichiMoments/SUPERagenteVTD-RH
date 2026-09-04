@@ -4,8 +4,8 @@ Mismo patrón que otrosi/tools.py: cada herramienta tiene un docstring en
 español que Gemini usa para decidir cuál invocar, y ninguna deja subir una
 excepción al agente.
 
-``crear_herramientas(sender)`` devuelve las herramientas con notificación
-al canal de Teams cuando se registra una citación.
+``crear_herramientas(sender, email_sender)`` devuelve las herramientas con
+notificación al canal de Teams y/o por email cuando se registra una citación.
 """
 
 import logging
@@ -159,8 +159,20 @@ def actualizar_citacion(id_citacion: int, nuevo_estado: str) -> dict:
 todas = [registrar_citacion, consultar_citaciones, obtener_citacion, actualizar_citacion]
 
 
-def _notificar_canal(sender, citacion_guardada, persona_citada, tipo_citacion,
-                     fecha_citacion, autoridad, registrado_por):
+def _construir_html_citacion(citacion):
+    """HTML compartido entre notificación inicial y actualización del mensaje."""
+    return (
+        f"<b>Citación #{citacion.id}</b><br/>"
+        f"<b>Persona citada:</b> {_html_escape(citacion.persona_citada)}<br/>"
+        f"<b>Tipo:</b> {_html_escape(citacion.tipo_citacion)}<br/>"
+        f"<b>Fecha:</b> {_html_escape(str(citacion.fecha_citacion))}<br/>"
+        f"<b>Autoridad:</b> {_html_escape(citacion.autoridad)}<br/>"
+        f"<b>Registrada por:</b> {_html_escape(citacion.registrado_por)}<br/>"
+        f"<b>Estado:</b> {_html_escape(citacion.estado)}"
+    )
+
+
+def _notificar_canal(sender, citacion_guardada):
     from teams_core.domain.models import ConversationRef, ConversationKind, OutboundMessage
 
     team_id = os.environ.get("TEAMS_CHANNEL_TEAM_ID")
@@ -172,24 +184,61 @@ def _notificar_canal(sender, citacion_guardada, persona_citada, tipo_citacion,
         conv = ConversationRef(
             kind=ConversationKind.CHANNEL, team_id=team_id, channel_id=channel_id,
         )
-        html = (
-            f"<b>Nueva citación registrada</b><br/>"
-            f"<b>Persona citada:</b> {_html_escape(persona_citada)}<br/>"
-            f"<b>Tipo:</b> {_html_escape(tipo_citacion)}<br/>"
-            f"<b>Fecha:</b> {_html_escape(fecha_citacion)}<br/>"
-            f"<b>Autoridad:</b> {_html_escape(autoridad)}<br/>"
-            f"<b>Registrada por:</b> {_html_escape(registrado_por)}<br/>"
-            f"<b>ID:</b> #{citacion_guardada.id}"
-        )
-        sender.send(conv, OutboundMessage(body_html=html))
-        logger.info("Notificación de citación #%s enviada al canal", citacion_guardada.id)
+        html = _construir_html_citacion(citacion_guardada)
+        msg_id = sender.send(conv, OutboundMessage(body_html=html))
+        crud.guardar_message_id(citacion_guardada.id, msg_id)
+        logger.info("Notificación de citación #%s enviada al canal (msg_id=%s)",
+                     citacion_guardada.id, msg_id)
     except Exception as e:
         logger.warning("No se pudo enviar notificación al canal: %s", e)
 
 
-def crear_herramientas(sender=None):
-    """Devuelve las herramientas de citaciones, con notificación al canal si hay sender."""
-    if sender is None:
+def _notificar_email(email_sender, citacion_guardada):
+    from teams_core.domain.models import OutboundEmail, EmailAddress
+
+    destinatarios_raw = os.environ.get("CITACIONES_EMAIL_DESTINATARIOS", "")
+    if not destinatarios_raw.strip():
+        logger.info("Notificación por email omitida: CITACIONES_EMAIL_DESTINATARIOS vacío")
+        return
+    try:
+        destinatarios = [
+            EmailAddress(address=d.strip())
+            for d in destinatarios_raw.split(",")
+            if d.strip()
+        ]
+        html = _construir_html_citacion(citacion_guardada)
+        email = OutboundEmail(
+            subject=f"Nueva citación #{citacion_guardada.id} — {citacion_guardada.persona_citada}",
+            body_html=html,
+            to=destinatarios,
+        )
+        email_sender.send(email)
+        logger.info("Email de citación #%s enviado a %s",
+                     citacion_guardada.id,
+                     ", ".join(d.address for d in destinatarios))
+    except Exception as e:
+        logger.warning("No se pudo enviar email de citación: %s", e)
+
+
+def _actualizar_mensaje_canal(sender, citacion):
+    team_id = os.environ.get("TEAMS_CHANNEL_TEAM_ID")
+    channel_id = os.environ.get("TEAMS_CHANNEL_ID")
+    if not team_id or not channel_id or not citacion.message_id:
+        return
+    try:
+        path = f"/teams/{team_id}/channels/{channel_id}/messages/{citacion.message_id}"
+        html = _construir_html_citacion(citacion)
+        sender._client.request("PATCH", path, json={
+            "body": {"contentType": "html", "content": html},
+        })
+        logger.info("Mensaje del canal actualizado para citación #%s", citacion.id)
+    except Exception as e:
+        logger.warning("No se pudo actualizar mensaje del canal: %s", e)
+
+
+def crear_herramientas(sender=None, email_sender=None):
+    """Devuelve las herramientas de citaciones, con notificación al canal/email si hay sender."""
+    if sender is None and email_sender is None:
         return list(todas)
 
     @tool
@@ -226,11 +275,42 @@ def crear_herramientas(sender=None):
             return {"error": str(e)}
 
         guardada = crud.crear_citacion(citacion)
-        _notificar_canal(sender, guardada, persona_citada, tipo_citacion,
-                         fecha_citacion, autoridad, registrado_por)
+        if sender:
+            _notificar_canal(sender, guardada)
+        if email_sender:
+            _notificar_email(email_sender, guardada)
         return {
             "id": guardada.id,
             "mensaje": f"Citación #{guardada.id} registrada para {guardada.persona_citada}.",
+        }
+
+    @tool
+    def actualizar_citacion(id_citacion: int, nuevo_estado: str) -> dict:
+        """Actualiza el estado de una citación existente.
+
+        Úsala cuando el usuario indique que una citación ya fue atendida,
+        venció, o cambió de estado.
+
+        Args:
+            id_citacion: Identificador numérico de la citación.
+            nuevo_estado: 'pendiente', 'atendida' o 'vencida'.
+        """
+        if nuevo_estado not in ESTADOS:
+            return {
+                "error": f"«{nuevo_estado}» no es un estado válido. "
+                         f"Los estados son: {', '.join(ESTADOS)}."
+            }
+
+        actualizada = crud.actualizar_estado(id_citacion, nuevo_estado)
+        if actualizada is None:
+            return {"error": f"No existe ninguna citación con id {id_citacion}."}
+
+        if sender:
+            _actualizar_mensaje_canal(sender, actualizada)
+        return {
+            "id": actualizada.id,
+            "estado": actualizada.estado,
+            "mensaje": f"Citación #{actualizada.id} actualizada a estado «{actualizada.estado}».",
         }
 
     return [registrar_citacion, consultar_citaciones, obtener_citacion, actualizar_citacion]

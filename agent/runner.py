@@ -19,6 +19,7 @@ from teams_core.auth.provider import MsalTokenProvider
 from teams_core.adapters.graph.client import GraphClient
 from teams_core.adapters.graph.downloader import GraphFileDownloader
 from teams_core.adapters.graph.sender import GraphMessageSender
+from teams_core.adapters.graph.mail_sender import GraphEmailSender
 from teams_core.adapters.graph.reader import GraphMessageReader
 from teams_core.adapters.blob.storage import BlobStorageUploader
 from teams_core.domain.models import ConversationRef, ConversationKind, OutboundMessage
@@ -171,10 +172,11 @@ def main():
     client = GraphClient(cfg, tokens)
     reader = GraphMessageReader(client)
     sender = GraphMessageSender(client)
+    email_sender = GraphEmailSender(client)
     downloader = GraphFileDownloader(client)
     blob_uploader = BlobStorageUploader(cfg)
 
-    agente = crear_agente(clave_api, sender=sender)
+    agente = crear_agente(clave_api, sender=sender, email_sender=email_sender)
 
     chats_activos = _obtener_chats(client)
     ultimo_visto = {}

@@ -88,11 +88,12 @@ def _nodo_rechazo(estado):
     return {"messages": [AIMessage(content=alcance.RECHAZO_ESTATICO)]}
 
 
-def crear_agente(clave_api, modelo=MODELO, modelo_triaje=MODELO_TRIAJE, sender=None):
+def crear_agente(clave_api, modelo=MODELO, modelo_triaje=MODELO_TRIAJE,
+                 sender=None, email_sender=None):
     llm = ChatGoogleGenerativeAI(
         model=modelo, google_api_key=clave_api, temperature=0.1
     )
-    herramientas_citaciones = crear_herramientas_citaciones(sender)
+    herramientas_citaciones = crear_herramientas_citaciones(sender, email_sender)
     todas_las_herramientas = herramientas_otrosi + herramientas_citaciones
     agente_react = create_react_agent(llm, todas_las_herramientas, prompt=PROMPT_SISTEMA)
 

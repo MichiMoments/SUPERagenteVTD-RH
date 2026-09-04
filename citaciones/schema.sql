@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS citaciones (
                       CHECK (estado IN ('pendiente', 'atendida', 'vencida')),
     registrado_por    TEXT NOT NULL,
     creado_en         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    actualizado_en    TIMESTAMPTZ NOT NULL DEFAULT now()
+    actualizado_en    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    message_id        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_citaciones_estado_fecha
@@ -21,3 +22,6 @@ CREATE INDEX IF NOT EXISTS idx_citaciones_estado_fecha
 
 CREATE INDEX IF NOT EXISTS idx_citaciones_tipo
     ON citaciones (tipo_citacion);
+
+-- Migraciones para bases existentes (safe to re-run):
+ALTER TABLE citaciones ADD COLUMN IF NOT EXISTS message_id TEXT;

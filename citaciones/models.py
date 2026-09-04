@@ -24,6 +24,7 @@ class Citacion:
     id: int | None = None
     creado_en: datetime | None = None
     actualizado_en: datetime | None = None
+    message_id: str | None = None
 
     def __post_init__(self):
         if self.estado not in ESTADOS:
@@ -36,7 +37,7 @@ class Citacion:
 def desde_fila(fila: tuple) -> Citacion:
     """Convierte una fila de psycopg2 (orden de columnas de schema.sql) en Citacion."""
     (id_, persona_citada, tipo_citacion, fecha_citacion, autoridad,
-     estado, registrado_por, creado_en, actualizado_en) = fila
+     estado, registrado_por, creado_en, actualizado_en, message_id) = fila
     return Citacion(
         id=id_,
         persona_citada=persona_citada,
@@ -47,4 +48,5 @@ def desde_fila(fila: tuple) -> Citacion:
         registrado_por=registrado_por,
         creado_en=creado_en,
         actualizado_en=actualizado_en,
+        message_id=message_id,
     )
