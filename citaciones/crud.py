@@ -10,7 +10,7 @@ from .models import Citacion, desde_fila
 
 _COLUMNAS = (
     "id, persona_citada, tipo_citacion, fecha_citacion, autoridad, "
-    "estado, registrado_por, creado_en, actualizado_en"
+    "estado, registrado_por, creado_en, actualizado_en, message_id"
 )
 
 
@@ -78,6 +78,20 @@ def obtener_citacion(id_citacion: int):
             cur.execute(f"SELECT {_COLUMNAS} FROM citaciones WHERE id = %s", (id_citacion,))
             fila = cur.fetchone()
         return desde_fila(fila) if fila else None
+    finally:
+        db.put_conn(conn)
+
+
+def guardar_message_id(id_citacion: int, message_id: str) -> None:
+    """Asocia el id del mensaje de Teams al registro de la citación."""
+    conn = db.get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE citaciones SET message_id = %s WHERE id = %s",
+                (message_id, id_citacion),
+            )
+        conn.commit()
     finally:
         db.put_conn(conn)
 
