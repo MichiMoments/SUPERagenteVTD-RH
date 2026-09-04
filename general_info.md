@@ -45,7 +45,7 @@ citaciones/       PostgreSQL-backed citations tracker
   models.py       Citacion dataclass (10 fields incl. message_id) + ESTADOS -> (nothing)
   db.py           Lazy connection pool           -> psycopg2 (DATABASE_URL)
   crud.py         5 SQL functions (4 CRUD + guardar_message_id) -> db, models
-  tools.py        4 @tool wrappers + factory + channel notify/update -> crud, models, teams_core (optional)
+  tools.py        4 @tool wrappers + factory + channel notify/update + email notify -> crud, models, teams_core (optional)
   schema.sql      DDL: CREATE TABLE (incl. message_id) + indexes
 ```
 
@@ -660,9 +660,11 @@ otrosi/
                       CARVE_OUT_SOCIAL, REGLA_COMPUESTA, REGLA_ATRIBUCION,
                       RECHAZO_ESTATICO.
 citaciones/
-  tools.py            Four @tool wrappers + `crear_herramientas(sender)` factory.
+  tools.py            Four @tool wrappers + `crear_herramientas(sender, email_sender)` factory.
                       When sender is provided, `registrar_citacion` sends an
                       HTML notification to a Teams channel on success.
+                      When email_sender is provided, also sends an email to
+                      the addresses in CITACIONES_EMAIL_DESTINATARIOS.
 ```
 
 The **design principle** is the same as the Streamlit app: the agent layer is a thin
@@ -709,6 +711,7 @@ Initialization in `runner.py`:
 TeamsConfig.from_env() → MsalTokenProvider(cfg) → GraphClient(cfg, tokens)
                                                        ├→ GraphMessageReader
                                                        ├→ GraphMessageSender
+                                                       ├→ GraphEmailSender
                                                        ├→ GraphFileDownloader
                                                        └→ BlobStorageUploader(cfg)
 ```
@@ -724,12 +727,16 @@ links appended to the Teams reply, instead of attaching file bytes directly.
 so `InboundMessage.author.is_application` is always `False` for the bot's own messages.
 The runner filters those out by tracking `ids_enviados` (sent message IDs).
 
-**Email capabilities (available, not yet wired).** The middleware now includes
-`GraphEmailReader` and `GraphEmailSender` for reading and sending emails through the
-same `GraphClient` (no separate config needed). Auth scopes include `Mail.ReadWrite`
-and `Mail.Send` (delegated, same consent flow as Teams). The email adapters share the
-same initialization pattern as the Teams ones — pass `GraphClient` to the constructor.
-The project does not import or use them yet; they are available for a future feature.
+**Email capabilities.** The middleware includes `GraphEmailReader` and
+`GraphEmailSender` for reading and sending emails through the same `GraphClient`
+(no separate config needed). Auth scopes include `Mail.ReadWrite` and `Mail.Send`
+(delegated, same consent flow as Teams). The email adapters share the same
+initialization pattern as the Teams ones — pass `GraphClient` to the constructor.
+`GraphEmailSender` is now **wired into the project**: `runner.py` instantiates it
+alongside `GraphMessageSender` and passes it through `crear_agente` →
+`crear_herramientas` so that `registrar_citacion` sends an email notification to the
+addresses in `CITACIONES_EMAIL_DESTINATARIOS` on every new citation registration.
+`GraphEmailReader` is not used yet (available for a future feature).
 `GraphEmailReader.list_messages` reads `/me/messages` (optionally filtering by folder),
 `GraphEmailSender.send` posts to `/me/sendMail`, and `.reply` replies to an existing
 message. `OutboundEmail` supports HTML body, to/cc/bcc recipients, importance, and
@@ -770,6 +777,7 @@ in `run_agent.py`). There is no `.env.example` — create it manually:
 | `DATABASE_URL` | Yes (citaciones) | PostgreSQL connection string (e.g. `postgresql://citaciones:citaciones@localhost:5432/citaciones`) |
 | `TEAMS_CHANNEL_TEAM_ID` | No | Team ID for citation channel notifications (omit to skip notifications) |
 | `TEAMS_CHANNEL_ID` | No | Channel ID for citation channel notifications (omit to skip notifications) |
+| `CITACIONES_EMAIL_DESTINATARIOS` | No | Comma-separated email addresses to notify on new citations (e.g. `d.perezc23@uniandes.edu.co`). Empty or missing → no email sent |
 | `POLLING_INTERVAL` | No | Seconds between polling cycles (default: `10`) |
 | `CHAT_REFRESH_INTERVAL` | No | Seconds between chat-list refreshes (default: `10`) |
 
@@ -879,11 +887,13 @@ citaciones/
   crud.py           5 parameterized SQL functions (%s, no concatenation):
                     crear_citacion, buscar_citaciones, obtener_citacion,
                     actualizar_estado, guardar_message_id.
-  tools.py          4 LangChain @tool wrappers + `crear_herramientas(sender)` factory +
-                    `_notificar_canal` + `_actualizar_mensaje_canal` helpers for
-                    Teams channel notifications. `message_id` is persisted via
+  tools.py          4 LangChain @tool wrappers + `crear_herramientas(sender, email_sender)`
+                    factory + `_notificar_canal` + `_notificar_email` +
+                    `_actualizar_mensaje_canal` helpers for Teams channel and email
+                    notifications. `message_id` is persisted via
                     `crud.guardar_message_id` so the channel message can be
-                    PATCHed when a citation's estado changes.
+                    PATCHed when a citation's estado changes. Email recipients
+                    come from `CITACIONES_EMAIL_DESTINATARIOS` env var.
   schema.sql        CREATE TABLE IF NOT EXISTS citaciones (incl. message_id TEXT
                     nullable) + 2 indexes (estado+fecha, tipo). Includes a
                     commented-out ALTER TABLE migration for existing databases.
@@ -903,18 +913,20 @@ The agent now handles both otrosíes and citaciones through a single LangGraph g
   `RECHAZO_ESTATICO` cover both domains.
 - **State** (`agent/estado.py`): `Intencion.categoria` is a `Literal` with all four
   categories.
-- **Bot** (`agent/bot.py`): `crear_agente(clave_api, sender=None)` merges
-  `herramientas_otrosi` (6 tools) + `herramientas_citaciones` (4 tools) = 10 tools.
-  `PROMPT_SISTEMA` has separate operational rules for each domain.
-- **Runner** (`agent/runner.py`): passes `sender=sender` to `crear_agente` so that
-  `registrar_citacion` can send channel notifications.
-- **Factory pattern** (`citaciones/tools.py`): `crear_herramientas(sender)` returns
-  tool instances. When `sender` is provided, `registrar_citacion` and
-  `actualizar_citacion` are redefined inside closures: the first calls
-  `_notificar_canal` after a successful insert, the second calls
-  `_actualizar_mensaje_canal` to PATCH the existing channel message with the new
-  estado. `consultar_citaciones` and `obtener_citacion` need no sender and stay at
-  module level.
+- **Bot** (`agent/bot.py`): `crear_agente(clave_api, sender=None, email_sender=None)`
+  merges `herramientas_otrosi` (6 tools) + `herramientas_citaciones` (4 tools) = 10
+  tools. `PROMPT_SISTEMA` has separate operational rules for each domain.
+- **Runner** (`agent/runner.py`): passes `sender=sender, email_sender=email_sender`
+  to `crear_agente` so that
+  `registrar_citacion` can send channel and email notifications.
+- **Factory pattern** (`citaciones/tools.py`): `crear_herramientas(sender, email_sender)`
+  returns tool instances. When `sender` and/or `email_sender` are provided,
+  `registrar_citacion` and `actualizar_citacion` are redefined inside closures:
+  `registrar_citacion` calls `_notificar_canal` (if sender) and `_notificar_email`
+  (if email_sender) after a successful insert; `actualizar_citacion` calls
+  `_actualizar_mensaje_canal` (if sender) to PATCH the existing channel message with
+  the new estado. `consultar_citaciones` and `obtener_citacion` need neither and stay
+  at module level.
 - **Channel notification** (`_notificar_canal`): reads `TEAMS_CHANNEL_TEAM_ID` and
   `TEAMS_CHANNEL_ID` from env at call time. If either is missing, logs and returns
   silently (graceful degradation). Builds an HTML summary of the new citation
@@ -927,6 +939,12 @@ The agent now handles both otrosíes and citaciones through a single LangGraph g
   the `Citacion` dataclass) with the updated HTML card via
   `sender._client.request("PATCH", ...)`. If `message_id` is missing or the env vars
   are not set, returns silently.
+- **Email notification** (`_notificar_email`): reads `CITACIONES_EMAIL_DESTINATARIOS`
+  from env at call time (comma-separated addresses). If empty or missing, logs and
+  returns silently. Builds an `OutboundEmail` with the same HTML from
+  `_construir_html_citacion` and a descriptive subject line
+  (`"Nueva citación #N — Persona"`), then sends via `email_sender.send(email)`.
+  Only fires on registration, not on estado updates. Failure is caught and logged.
 
 ### Data flow
 
@@ -936,6 +954,7 @@ Save:
     → crud.crear_citacion → INSERT INTO citaciones RETURNING *
     → _notificar_canal → sender.send to Teams channel (optional)
     → crud.guardar_message_id (persists the channel msg_id)
+    → _notificar_email → email_sender.send to CITACIONES_EMAIL_DESTINATARIOS (optional)
     → {id, mensaje} → agent response → Teams reply
 
 Retrieve:

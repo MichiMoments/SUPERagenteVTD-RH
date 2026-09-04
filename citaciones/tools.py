@@ -4,8 +4,8 @@ Mismo patrón que otrosi/tools.py: cada herramienta tiene un docstring en
 español que Gemini usa para decidir cuál invocar, y ninguna deja subir una
 excepción al agente.
 
-``crear_herramientas(sender)`` devuelve las herramientas con notificación
-al canal de Teams cuando se registra una citación.
+``crear_herramientas(sender, email_sender)`` devuelve las herramientas con
+notificación al canal de Teams y/o por email cuando se registra una citación.
 """
 
 import logging
@@ -193,6 +193,33 @@ def _notificar_canal(sender, citacion_guardada):
         logger.warning("No se pudo enviar notificación al canal: %s", e)
 
 
+def _notificar_email(email_sender, citacion_guardada):
+    from teams_core.domain.models import OutboundEmail, EmailAddress
+
+    destinatarios_raw = os.environ.get("CITACIONES_EMAIL_DESTINATARIOS", "")
+    if not destinatarios_raw.strip():
+        logger.info("Notificación por email omitida: CITACIONES_EMAIL_DESTINATARIOS vacío")
+        return
+    try:
+        destinatarios = [
+            EmailAddress(address=d.strip())
+            for d in destinatarios_raw.split(",")
+            if d.strip()
+        ]
+        html = _construir_html_citacion(citacion_guardada)
+        email = OutboundEmail(
+            subject=f"Nueva citación #{citacion_guardada.id} — {citacion_guardada.persona_citada}",
+            body_html=html,
+            to=destinatarios,
+        )
+        email_sender.send(email)
+        logger.info("Email de citación #%s enviado a %s",
+                     citacion_guardada.id,
+                     ", ".join(d.address for d in destinatarios))
+    except Exception as e:
+        logger.warning("No se pudo enviar email de citación: %s", e)
+
+
 def _actualizar_mensaje_canal(sender, citacion):
     team_id = os.environ.get("TEAMS_CHANNEL_TEAM_ID")
     channel_id = os.environ.get("TEAMS_CHANNEL_ID")
@@ -209,9 +236,9 @@ def _actualizar_mensaje_canal(sender, citacion):
         logger.warning("No se pudo actualizar mensaje del canal: %s", e)
 
 
-def crear_herramientas(sender=None):
-    """Devuelve las herramientas de citaciones, con notificación al canal si hay sender."""
-    if sender is None:
+def crear_herramientas(sender=None, email_sender=None):
+    """Devuelve las herramientas de citaciones, con notificación al canal/email si hay sender."""
+    if sender is None and email_sender is None:
         return list(todas)
 
     @tool
@@ -248,7 +275,10 @@ def crear_herramientas(sender=None):
             return {"error": str(e)}
 
         guardada = crud.crear_citacion(citacion)
-        _notificar_canal(sender, guardada)
+        if sender:
+            _notificar_canal(sender, guardada)
+        if email_sender:
+            _notificar_email(email_sender, guardada)
         return {
             "id": guardada.id,
             "mensaje": f"Citación #{guardada.id} registrada para {guardada.persona_citada}.",
@@ -275,7 +305,8 @@ def crear_herramientas(sender=None):
         if actualizada is None:
             return {"error": f"No existe ninguna citación con id {id_citacion}."}
 
-        _actualizar_mensaje_canal(sender, actualizada)
+        if sender:
+            _actualizar_mensaje_canal(sender, actualizada)
         return {
             "id": actualizada.id,
             "estado": actualizada.estado,

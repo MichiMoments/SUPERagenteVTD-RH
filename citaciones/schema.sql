@@ -23,5 +23,5 @@ CREATE INDEX IF NOT EXISTS idx_citaciones_estado_fecha
 CREATE INDEX IF NOT EXISTS idx_citaciones_tipo
     ON citaciones (tipo_citacion);
 
--- Migración para bases existentes:
--- ALTER TABLE citaciones ADD COLUMN IF NOT EXISTS message_id TEXT;
+-- Migraciones para bases existentes (safe to re-run):
+ALTER TABLE citaciones ADD COLUMN IF NOT EXISTS message_id TEXT;
