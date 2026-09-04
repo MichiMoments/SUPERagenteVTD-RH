@@ -863,8 +863,8 @@ citaciones/
                     `_notificar_canal` helper for Teams channel notifications.
   schema.sql        CREATE TABLE IF NOT EXISTS citaciones + 2 indexes
                     (estado+fecha, tipo).
-  consulta_db.py    Standalone diagnostic: prints all tables and rows from PostgreSQL.
-                    Run with: python -m citaciones.consulta_db
+  test_consulta_db.py    Standalone diagnostic: prints all tables and rows from PostgreSQL.
+                    Run with: python -m citaciones.test_consulta_db
 ```
 
 ### Agent integration (phase 3)
@@ -935,7 +935,7 @@ DATABASE_URL=postgresql://citaciones:citaciones@localhost:5432/citaciones
 Verify with the diagnostic script:
 
 ```powershell
-venv\Scripts\python -m citaciones.consulta_db
+venv\Scripts\python -m citaciones.test_consulta_db
 ```
 
 CRUD smoke test from the project root:
