@@ -262,6 +262,52 @@ def plantilla_excel(tipo_id: str) -> dict:
     }
 
 
+@tool
+def editar_cuerpo(tipo_id: str, cuerpo_nuevo: str) -> dict:
+    """Edita el cuerpo (texto del documento) de un tipo de otrosí existente.
+
+    Úsala cuando el usuario quiera modificar la redacción, el formato o la
+    estructura del texto de una plantilla ya guardada — por ejemplo, cambiar
+    cómo se ve el bloque de firmas. Solo cambia el cuerpo; los campos, el
+    título y demás metadatos del tipo quedan intactos.
+
+    Antes de invocar esta herramienta, usa 'describir_tipo' para conocer los
+    campos del tipo y asegurarte de que el cuerpo nuevo use los mismos
+    marcadores {{campo}} que ya existen. Envía el cuerpo completo, no un
+    fragmento: se reemplaza entero.
+
+    Args:
+        tipo_id: Identificador del tipo (ej: 'otrosi_cambio_cargo_salario').
+        cuerpo_nuevo: Texto completo del cuerpo en el dialecto Markdown del
+                      proyecto: párrafos, **negrita**, - viñetas,
+                      | a | b | tablas, y <!-- tabla-sin-bordes -->.
+    """
+    try:
+        tipo = tipos.cargar(tipo_id)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    tipo["cuerpo"] = cuerpo_nuevo
+
+    errores, avisos = tipos.validar(tipo)
+    if errores:
+        return {
+            "error": "El cuerpo nuevo tiene errores de validación",
+            "errores": errores,
+            "avisos": avisos,
+        }
+
+    try:
+        guardado = tipos.guardar(tipo)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    return {
+        "mensaje": f"Cuerpo del tipo «{guardado['nombre']}» actualizado.",
+        "avisos": avisos,
+    }
+
+
 def _preparar_datos(tipo, datos):
     """Convierte strings ISO a date para campos de tipo fecha."""
     for campo in tipo.get("campos", []):
@@ -284,4 +330,5 @@ def _preparar_datos(tipo, datos):
     return datos
 
 
-todas = [listar_tipos, describir_tipo, generar_contrato, generar_masivo, crear_plantilla, plantilla_excel]
+todas = [listar_tipos, describir_tipo, generar_contrato, generar_masivo, crear_plantilla,
+         plantilla_excel, editar_cuerpo]

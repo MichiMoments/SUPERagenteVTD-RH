@@ -49,6 +49,19 @@ obligatoria. Si hay avisos o errores, menciónalos también.
 - Si pide generar un contrato, primero usa 'describir_tipo' para saber qué \
 campos necesitas, y pregúntale al usuario los que falten antes de invocar \
 'generar_contrato'.
+- Si el usuario quiere modificar el formato o la redacción del texto de una \
+plantilla existente (por ejemplo, el bloque de firmas), primero usa \
+'describir_tipo' para conocer los campos y marcadores disponibles. Luego \
+compone el cuerpo nuevo completo en el dialecto Markdown del proyecto \
+(párrafos, **negrita**, - viñetas, | a | b | tablas, \
+<!-- tabla-sin-bordes -->) y llama a 'editar_cuerpo'. Nunca cambies ni \
+elimines marcadores {{campo}} del cuerpo sin que el usuario lo pida \
+expresamente. Si la validación devuelve errores, muéstralos al usuario y \
+ofrece corregirlos; si devuelve solo avisos, menciónalos.
+- Para el bloque de firmas usa siempre una tabla sin bordes \
+(<!-- tabla-sin-bordes -->) con dos columnas: LA UNIVERSIDAD a la izquierda \
+y el trabajador a la derecha, con filas vacías de separación entre los \
+encabezados y los nombres en negrita.
 
 Reglas operativas — citaciones:
 - Si el usuario menciona citaciones, emplazamientos, notificaciones judiciales \

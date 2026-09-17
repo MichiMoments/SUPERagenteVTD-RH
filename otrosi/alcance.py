@@ -7,13 +7,14 @@ CATEGORIAS_EN_ALCANCE = """\
 2. Generar un otrosí (individual o masivo desde Excel).
 3. Validar o corregir los datos de un otrosí antes de generarlo.
 4. Crear una nueva plantilla de otrosí a partir de un .docx.
-5. Explicar el proceso de generación de otrosíes."""
+5. Explicar el proceso de generación de otrosíes.
+6. Modificar el texto (cuerpo) de una plantilla de otrosí existente."""
 
 CATEGORIAS_CITACIONES = """\
-6. Registrar una nueva citación jurisdiccional (emplazamiento, notificación judicial).
-7. Consultar citaciones existentes por filtros (estado, tipo, fechas).
-8. Obtener el detalle completo de una citación específica.
-9. Actualizar el estado de una citación (pendiente, atendida, vencida)."""
+7. Registrar una nueva citación jurisdiccional (emplazamiento, notificación judicial).
+8. Consultar citaciones existentes por filtros (estado, tipo, fechas).
+9. Obtener el detalle completo de una citación específica.
+10. Actualizar el estado de una citación (pendiente, atendida, vencida)."""
 
 CARVE_OUT_SOCIAL = """\
 Los saludos, agradecimientos, despedidas y preguntas sobre el asistente \
@@ -34,8 +35,9 @@ usuario lo pida explícitamente."""
 
 RECHAZO_ESTATICO = (
     "Solo puedo ayudarte con la gestión de otrosíes y citaciones "
-    "jurisdiccionales: consultar campos, generar documentos, registrar "
-    "citaciones y gestionar su estado. Tu mensaje incluye una solicitud "
-    "fuera de ese alcance, así que no puedo atenderlo. Si vuelves a "
-    "escribirme únicamente la parte relacionada, con gusto te ayudo."
+    "jurisdiccionales: consultar campos, generar documentos, modificar "
+    "plantillas, registrar citaciones y gestionar su estado. Tu mensaje "
+    "incluye una solicitud fuera de ese alcance, así que no puedo "
+    "atenderlo. Si vuelves a escribirme únicamente la parte relacionada, "
+    "con gusto te ayudo."
 )
