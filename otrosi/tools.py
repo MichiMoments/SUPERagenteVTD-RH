@@ -262,37 +262,80 @@ def plantilla_excel(tipo_id: str) -> dict:
     }
 
 
+def _secciones_cuerpo(cuerpo: str) -> list[str]:
+    """Divide el cuerpo en secciones separadas por líneas en blanco."""
+    return cuerpo.split("\n\n")
+
+
 @tool
-def editar_cuerpo(tipo_id: str, cuerpo_nuevo: str) -> dict:
-    """Edita el cuerpo (texto del documento) de un tipo de otrosí existente.
+def ver_cuerpo(tipo_id: str) -> dict:
+    """Muestra el cuerpo de una plantilla dividido en secciones numeradas.
 
-    Úsala cuando el usuario quiera modificar la redacción, el formato o la
-    estructura del texto de una plantilla ya guardada — por ejemplo, cambiar
-    cómo se ve el bloque de firmas. Solo cambia el cuerpo; los campos, el
-    título y demás metadatos del tipo quedan intactos.
-
-    Antes de invocar esta herramienta, usa 'describir_tipo' para conocer los
-    campos del tipo y asegurarte de que el cuerpo nuevo use los mismos
-    marcadores {{campo}} que ya existen. Envía el cuerpo completo, no un
-    fragmento: se reemplaza entero.
+    Úsala ANTES de 'editar_seccion_cuerpo' para ver qué sección necesita
+    cambios. Cada sección es un bloque de texto separado por líneas en blanco.
 
     Args:
         tipo_id: Identificador del tipo (ej: 'otrosi_cambio_cargo_salario').
-        cuerpo_nuevo: Texto completo del cuerpo en el dialecto Markdown del
-                      proyecto: párrafos, **negrita**, - viñetas,
-                      | a | b | tablas, y <!-- tabla-sin-bordes -->.
     """
     try:
         tipo = tipos.cargar(tipo_id)
     except ValueError as e:
         return {"error": str(e)}
 
-    tipo["cuerpo"] = cuerpo_nuevo
+    secciones = _secciones_cuerpo(tipo["cuerpo"])
+    numeradas = []
+    for i, seccion in enumerate(secciones):
+        preview = seccion[:120]
+        if len(seccion) > 120:
+            preview += "…"
+        numeradas.append(f"[{i}] {preview}")
+
+    return {
+        "tipo": tipo["nombre"],
+        "total_secciones": len(secciones),
+        "secciones": numeradas,
+    }
+
+
+@tool
+def editar_seccion_cuerpo(tipo_id: str, indice_seccion: int,
+                          seccion_nueva: str) -> dict:
+    """Reemplaza UNA sección específica del cuerpo de una plantilla de otrosí.
+
+    Solo modifica la sección indicada; el resto del cuerpo queda intacto.
+    Primero usa 'ver_cuerpo' para identificar el índice de la sección que el
+    usuario quiere cambiar.
+
+    Args:
+        tipo_id: Identificador del tipo (ej: 'otrosi_cambio_cargo_salario').
+        indice_seccion: Índice de la sección a reemplazar (empieza en 0),
+                        obtenido de 'ver_cuerpo'.
+        seccion_nueva: Texto nuevo para esa sección, en el dialecto Markdown
+                       del proyecto (párrafos, **negrita**, - viñetas,
+                       | a | b | tablas, <!-- tabla-sin-bordes -->).
+                       No incluyas líneas en blanco al inicio ni al final:
+                       las separaciones entre secciones se manejan solas.
+    """
+    try:
+        tipo = tipos.cargar(tipo_id)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    secciones = _secciones_cuerpo(tipo["cuerpo"])
+
+    if indice_seccion < 0 or indice_seccion >= len(secciones):
+        return {
+            "error": f"Índice fuera de rango: el cuerpo tiene {len(secciones)} "
+                     f"secciones (0–{len(secciones) - 1}).",
+        }
+
+    secciones[indice_seccion] = seccion_nueva.strip()
+    tipo["cuerpo"] = "\n\n".join(secciones)
 
     errores, avisos = tipos.validar(tipo)
     if errores:
         return {
-            "error": "El cuerpo nuevo tiene errores de validación",
+            "error": "La sección nueva produce errores de validación",
             "errores": errores,
             "avisos": avisos,
         }
@@ -303,7 +346,7 @@ def editar_cuerpo(tipo_id: str, cuerpo_nuevo: str) -> dict:
         return {"error": str(e)}
 
     return {
-        "mensaje": f"Cuerpo del tipo «{guardado['nombre']}» actualizado.",
+        "mensaje": f"Sección {indice_seccion} del tipo «{guardado['nombre']}» actualizada.",
         "avisos": avisos,
     }
 
@@ -331,4 +374,4 @@ def _preparar_datos(tipo, datos):
 
 
 todas = [listar_tipos, describir_tipo, generar_contrato, generar_masivo, crear_plantilla,
-         plantilla_excel, editar_cuerpo]
+         plantilla_excel, ver_cuerpo, editar_seccion_cuerpo]

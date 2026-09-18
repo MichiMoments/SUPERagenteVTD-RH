@@ -54,6 +54,18 @@ def registrar_citacion(persona_citada: str, tipo_citacion: str, fecha_citacion: 
     except ValueError as e:
         return {"error": str(e)}
 
+    existente = crud.buscar_duplicada(persona_citada, tipo_citacion, fecha, autoridad)
+    if existente:
+        return {
+            "id": existente.id,
+            "mensaje": (
+                f"Ya existe la citación #{existente.id} para {existente.persona_citada} "
+                f"({existente.tipo_citacion}, {existente.fecha_citacion}, {existente.autoridad}). "
+                f"No se registró duplicado."
+            ),
+            "duplicada": True,
+        }
+
     guardada = crud.crear_citacion(citacion)
     return {
         "id": guardada.id,
@@ -273,6 +285,18 @@ def crear_herramientas(sender=None, email_sender=None):
             )
         except ValueError as e:
             return {"error": str(e)}
+
+        existente = crud.buscar_duplicada(persona_citada, tipo_citacion, fecha, autoridad)
+        if existente:
+            return {
+                "id": existente.id,
+                "mensaje": (
+                    f"Ya existe la citación #{existente.id} para {existente.persona_citada} "
+                    f"({existente.tipo_citacion}, {existente.fecha_citacion}, {existente.autoridad}). "
+                    f"No se registró duplicado."
+                ),
+                "duplicada": True,
+            }
 
         guardada = crud.crear_citacion(citacion)
         if sender:

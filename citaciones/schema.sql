@@ -25,3 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_citaciones_tipo
 
 -- Migraciones para bases existentes (safe to re-run):
 ALTER TABLE citaciones ADD COLUMN IF NOT EXISTS message_id TEXT;
+
+-- Red de seguridad contra duplicados (además del chequeo en citaciones/tools.py).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_citaciones_business_key
+    ON citaciones (lower(persona_citada), lower(tipo_citacion), fecha_citacion, lower(autoridad));

@@ -38,6 +38,29 @@ def crear_citacion(citacion: Citacion) -> Citacion:
         db.put_conn(conn)
 
 
+def buscar_duplicada(persona_citada: str, tipo_citacion: str, fecha_citacion, autoridad: str):
+    """Devuelve una Citacion existente con la misma clave de negocio, o None."""
+    conn = db.get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {_COLUMNAS}
+                FROM citaciones
+                WHERE lower(persona_citada) = lower(%s)
+                  AND lower(tipo_citacion) = lower(%s)
+                  AND fecha_citacion = %s
+                  AND lower(autoridad) = lower(%s)
+                LIMIT 1
+                """,
+                (persona_citada, tipo_citacion, fecha_citacion, autoridad),
+            )
+            fila = cur.fetchone()
+        return desde_fila(fila) if fila else None
+    finally:
+        db.put_conn(conn)
+
+
 def buscar_citaciones(estado=None, tipo_citacion=None, desde=None, hasta=None):
     """Busca citaciones con filtros opcionales; None omite ese filtro."""
     condiciones, valores = [], []

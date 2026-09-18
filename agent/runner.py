@@ -9,8 +9,10 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from html import escape as _html_escape
+from html import unescape as _html_unescape
 
 import markdown as _md
 
@@ -20,6 +22,7 @@ from teams_core.adapters.graph.client import GraphClient
 from teams_core.adapters.graph.downloader import GraphFileDownloader
 from teams_core.adapters.graph.sender import GraphMessageSender
 from teams_core.adapters.graph.mail_sender import GraphEmailSender
+from teams_core.adapters.graph.mail_reader import GraphEmailReader
 from teams_core.adapters.graph.reader import GraphMessageReader
 from teams_core.adapters.blob.storage import BlobStorageUploader
 from teams_core.domain.models import ConversationRef, ConversationKind, OutboundMessage
@@ -31,9 +34,13 @@ logger = logging.getLogger(__name__)
 
 INTERVALO_POLLING = int(os.environ.get("POLLING_INTERVAL", "10"))
 INTERVALO_REFRESCO_CHATS = int(os.environ.get("CHAT_REFRESH_INTERVAL", "10"))
+INTERVALO_POLLING_EMAIL = int(os.environ.get("EMAIL_POLLING_INTERVAL", "60"))
+CARPETA_EMAIL = os.environ.get("EMAIL_FOLDER_ID", "") or None
+LIMITE_EMAIL = int(os.environ.get("EMAIL_LIMIT", "10"))
 STAGING_DIR = os.path.join(os.path.dirname(__file__), "..", "output", ".staging")
 MAX_IDS_ENVIADOS = 5000
 MAX_HISTORIAL_POR_CHAT = 50
+MAX_EMAILS_PROCESADOS = 5000
 
 
 def _descargar_adjuntos(mensaje, downloader):
@@ -145,8 +152,8 @@ def _inicializar_chat(reader, conv):
         return None
 
 
-def _podar_estado(ids_enviados, historial_chat):
-    """Previene crecimiento ilimitado de ids_enviados e historial_chat."""
+def _podar_estado(ids_enviados, historial_chat, emails_procesados=None):
+    """Previene crecimiento ilimitado de ids_enviados, historial_chat y emails_procesados."""
     if len(ids_enviados) > MAX_IDS_ENVIADOS:
         logger.info("Podando ids_enviados: %d -> vaciando", len(ids_enviados))
         ids_enviados.clear()
@@ -154,6 +161,71 @@ def _podar_estado(ids_enviados, historial_chat):
     for chat_key, historial in historial_chat.items():
         if len(historial) > MAX_HISTORIAL_POR_CHAT:
             historial_chat[chat_key] = historial[-MAX_HISTORIAL_POR_CHAT:]
+
+    if emails_procesados is not None and len(emails_procesados) > MAX_EMAILS_PROCESADOS:
+        logger.info("Podando emails_procesados: %d -> vaciando", len(emails_procesados))
+        emails_procesados.clear()
+
+
+def _html_a_texto(html):
+    """Extrae texto plano de HTML de correo, sin dependencias externas."""
+    texto = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    texto = re.sub(r"<[^>]+>", " ", texto)
+    texto = _html_unescape(texto)
+    return re.sub(r" {2,}", " ", texto).strip()
+
+
+def _procesar_correos(email_reader, agente, emails_procesados, folder_id, limit, bot_email=""):
+    """Lee correos nuevos, los clasifica con el agente y registra citaciones detectadas."""
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    correos = email_reader.list_messages(folder_id=folder_id, limit=limit)
+    for correo in correos:
+        if correo.message_id in emails_procesados:
+            continue
+
+        if bot_email and correo.from_address.address.strip().lower() == bot_email:
+            logger.debug("Correo propio omitido: %s", correo.subject)
+            emails_procesados.add(correo.message_id)
+            continue
+
+        remitente = correo.from_address.name or correo.from_address.address
+        cuerpo_texto = (
+            _html_a_texto(correo.body_html) if correo.body_html else correo.body_preview
+        )
+        texto_entrada = (
+            f"[Correo recibido]\n"
+            f"De: {remitente} <{correo.from_address.address}>\n"
+            f"Asunto: {correo.subject}\n"
+            f"Fecha: {correo.received_at}\n\n"
+            f"{cuerpo_texto}"
+        )
+
+        try:
+            resultado = agente.invoke({"messages": [HumanMessage(content=texto_entrada)]})
+            msgs_salida = resultado.get("messages", [])
+
+            registro_citacion = any(
+                isinstance(m, ToolMessage) and m.name == "registrar_citacion"
+                for m in msgs_salida
+            )
+            if registro_citacion:
+                logger.info(
+                    "Citación registrada desde correo de %s (asunto: %s)",
+                    remitente, correo.subject,
+                )
+            else:
+                logger.info(
+                    "Correo de %s ignorado (no es una citación): %s",
+                    remitente, correo.subject,
+                )
+        except Exception as e:
+            logger.error(
+                "Error procesando correo %s de %s: %s",
+                correo.message_id, remitente, e,
+            )
+
+        emails_procesados.add(correo.message_id)
 
 
 def main():
@@ -173,8 +245,20 @@ def main():
     reader = GraphMessageReader(client)
     sender = GraphMessageSender(client)
     email_sender = GraphEmailSender(client)
+    email_reader = GraphEmailReader(client)
     downloader = GraphFileDownloader(client)
     blob_uploader = BlobStorageUploader(cfg)
+
+    try:
+        _me = client.request("GET", "/me", params={"$select": "mail,userPrincipalName"})
+        bot_email = (_me.get("mail") or _me.get("userPrincipalName") or "").strip().lower()
+        if bot_email:
+            logger.info("Identidad del bot resuelta: %s", bot_email)
+        else:
+            logger.warning("No se pudo resolver email del bot — filtro de auto-correo desactivado")
+    except Exception as e:
+        logger.warning("Error al llamar /me: %s — filtro de auto-correo desactivado", e)
+        bot_email = ""
 
     agente = crear_agente(clave_api, sender=sender, email_sender=email_sender)
 
@@ -182,16 +266,24 @@ def main():
     ultimo_visto = {}
     historial_chat = {}
     ids_enviados = set()
+    emails_procesados = set()
 
     for chat_id, conv in chats_activos.items():
         ultimo_visto[chat_id] = _inicializar_chat(reader, conv)
 
+    try:
+        for correo in email_reader.list_messages(folder_id=CARPETA_EMAIL, limit=LIMITE_EMAIL):
+            emails_procesados.add(correo.message_id)
+    except Exception as e:
+        logger.warning("No se pudo inicializar el watermark de correos: %s", e)
+
     logger.info(
-        "Agente iniciado. Polling cada %ds en %d chats.",
-        INTERVALO_POLLING, len(chats_activos),
+        "Agente iniciado. Polling cada %ds en %d chats, correos cada %ds.",
+        INTERVALO_POLLING, len(chats_activos), INTERVALO_POLLING_EMAIL,
     )
 
     ultima_actualizacion_chats = time.monotonic()
+    ultima_lectura_email = time.monotonic()
 
     while True:
         ahora = time.monotonic()
@@ -293,7 +385,17 @@ def main():
                 logger.error("Error polling chat %s: %s", chat_id[:12], e)
                 continue
 
-        _podar_estado(ids_enviados, historial_chat)
+        if ahora - ultima_lectura_email >= INTERVALO_POLLING_EMAIL:
+            try:
+                _procesar_correos(
+                    email_reader, agente, emails_procesados, CARPETA_EMAIL, LIMITE_EMAIL,
+                    bot_email=bot_email,
+                )
+            except Exception as e:
+                logger.error("Error en polling de correos: %s", e)
+            ultima_lectura_email = ahora
+
+        _podar_estado(ids_enviados, historial_chat, emails_procesados)
 
         time.sleep(INTERVALO_POLLING)
 
