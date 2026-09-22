@@ -769,7 +769,7 @@ in `run_agent.py`). There is no `.env.example` — create it manually:
 | `TEAMS_REDIRECT_URI` | Yes | OAuth redirect URI (e.g. `http://localhost:8400/callback`) |
 | `TEAMS_TOKEN_CACHE_PATH` | Yes | Path to encrypted token cache (e.g. `./token_cache.enc`) |
 | `TEAMS_TOKEN_CACHE_KEY` | Yes | Fernet key for token cache encryption |
-| `TEAMS_TOKEN_LOCK_URL` | Yes | Redis URL for token-refresh locking |
+| `TEAMS_TOKEN_LOCK_URL` | No | Redis URL for token-refresh locking. Omit for single-process deployments — `MsalTokenProvider` falls back to a file-based lock next to `token_cache.enc` |
 | `TEAMS_NOTIFICATION_URL` | Yes | Webhook URL for Teams change notifications |
 | `TEAMS_LIFECYCLE_URL` | Yes | Webhook URL for Teams lifecycle notifications |
 | `TEAMS_CLIENT_STATE` | Yes | Shared secret for validating Teams webhook callbacks |

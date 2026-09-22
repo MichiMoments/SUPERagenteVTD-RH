@@ -155,8 +155,10 @@ def _inicializar_chat(reader, conv):
 def _podar_estado(ids_enviados, historial_chat, emails_procesados=None):
     """Previene crecimiento ilimitado de ids_enviados, historial_chat y emails_procesados."""
     if len(ids_enviados) > MAX_IDS_ENVIADOS:
-        logger.info("Podando ids_enviados: %d -> vaciando", len(ids_enviados))
-        ids_enviados.clear()
+        logger.info("Podando ids_enviados: %d -> descartando la mitad más antigua", len(ids_enviados))
+        claves = list(ids_enviados.keys())
+        for k in claves[: len(claves) // 2]:
+            del ids_enviados[k]
 
     for chat_key, historial in historial_chat.items():
         if len(historial) > MAX_HISTORIAL_POR_CHAT:
@@ -250,22 +252,26 @@ def main():
     blob_uploader = BlobStorageUploader(cfg)
 
     try:
-        _me = client.request("GET", "/me", params={"$select": "mail,userPrincipalName"})
+        _me = client.request("GET", "/me", params={"$select": "id,mail,userPrincipalName"})
         bot_email = (_me.get("mail") or _me.get("userPrincipalName") or "").strip().lower()
+        id_bot = _me.get("id", "")
         if bot_email:
-            logger.info("Identidad del bot resuelta: %s", bot_email)
+            logger.info("Identidad del bot resuelta: %s (id: %s)", bot_email, id_bot)
         else:
             logger.warning("No se pudo resolver email del bot — filtro de auto-correo desactivado")
+        if not id_bot:
+            logger.warning("No se pudo resolver id del bot — filtro de auto-mensaje por id desactivado")
     except Exception as e:
-        logger.warning("Error al llamar /me: %s — filtro de auto-correo desactivado", e)
+        logger.warning("Error al llamar /me: %s — filtros de auto-mensaje desactivados", e)
         bot_email = ""
+        id_bot = ""
 
     agente = crear_agente(clave_api, sender=sender, email_sender=email_sender)
 
     chats_activos = _obtener_chats(client)
     ultimo_visto = {}
     historial_chat = {}
-    ids_enviados = set()
+    ids_enviados = {}
     emails_procesados = set()
 
     for chat_id, conv in chats_activos.items():
@@ -312,11 +318,16 @@ def main():
                         continue
                     if msg.author.is_application:
                         continue
+                    if id_bot and msg.author.id == id_bot:
+                        continue
                     if not msg.author.display_name:
                         continue
                     if not msg.text or not msg.text.strip():
                         continue
                     nuevos.append(msg)
+
+                if nuevos:
+                    ultimo_visto[chat_id] = nuevos[0].message_id
 
                 for msg in nuevos:
                     logger.info(
@@ -357,7 +368,8 @@ def main():
                             reply_to_message_id=None,
                         )
                         sent_id = sender.send(msg_conv, respuesta)
-                        ids_enviados.add(sent_id)
+                        ids_enviados[sent_id] = None
+                        ultimo_visto[chat_id] = sent_id
 
                         historial.append(HumanMessage(content=texto_entrada))
                         historial.append(AIMessage(content=texto_salida))
@@ -375,11 +387,10 @@ def main():
                                     reply_to_message_id=None,
                                 ),
                             )
-                            ids_enviados.add(err_id)
+                            ids_enviados[err_id] = None
+                            ultimo_visto[chat_id] = err_id
                         except Exception:
                             logger.exception("Error enviando mensaje de error")
-
-                    ultimo_visto[chat_id] = msg.message_id
 
             except Exception as e:
                 logger.error("Error polling chat %s: %s", chat_id[:12], e)
